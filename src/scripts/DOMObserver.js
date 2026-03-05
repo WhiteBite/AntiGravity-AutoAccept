@@ -77,10 +77,8 @@ function buildDOMObserverScript(customTexts, blockedCommands, allowedCommands, a
     window.__AA_PAUSED = false; // Kill switch: set to true to stop all clicking
 
     var COOLDOWN_MS = 5000;
-    var EXPAND_COOLDOWN_MS = 8000;
-    var EXPAND_GLOBAL_THROTTLE_MS = 30000; // Global cooldown for ALL expand-type clicks
     var clickCooldowns = {};
-    var lastExpandClickTime = 0; // Global timestamp: last time ANY expand was clicked
+    var expandedOnce = {}; // Click-once-per-session: expand buttons are never re-clicked
 
     // Lightweight DOM path: walks up to 3 ancestors to create a structurally unique key.
     // Differentiates multiple "Accept" buttons in different DOM subtrees.
@@ -185,17 +183,11 @@ function buildDOMObserverScript(customTexts, blockedCommands, allowedCommands, a
                         continue;
                     }
 
-                    // Expand-specific guards: global throttle + text-based cooldown key
-                    // (text-based key survives React re-renders that change DOM paths)
+                    // Expand-specific guard: click-once-per-session
+                    // Once expanded, never re-click — prevents the overlay close → re-open loop (Issue #30)
                     if (isExpandType) {
-                        // Global throttle: block ALL expand clicks for 30s after any expand
-                        if (Date.now() - lastExpandClickTime < EXPAND_GLOBAL_THROTTLE_MS) {
-                            continue;
-                        }
-                        // Text-based cooldown: uses button text instead of DOM path
                         var expandKey = 'expand:' + (clickable.textContent || '').trim().toLowerCase().substring(0, 30);
-                        var expandLast = clickCooldowns[expandKey] || 0;
-                        if (expandLast && (Date.now() - expandLast < EXPAND_COOLDOWN_MS)) {
+                        if (expandedOnce[expandKey]) {
                             continue;
                         }
                     } else {
@@ -224,13 +216,14 @@ function buildDOMObserverScript(customTexts, blockedCommands, allowedCommands, a
         var now = Date.now();
         if (now - lastPrune < PRUNE_INTERVAL_MS) return;
         lastPrune = now;
-        var maxAge = EXPAND_COOLDOWN_MS * 2;
+        var maxAge = COOLDOWN_MS * 3;
         var keys = Object.keys(clickCooldowns);
         for (var i = 0; i < keys.length; i++) {
             if (now - clickCooldowns[keys[i]] > maxAge) {
                 delete clickCooldowns[keys[i]];
             }
         }
+        // Note: expandedOnce is never pruned — expand buttons stay suppressed for the session
     }
 
     // ═══ COMMAND FILTERING ═══
@@ -349,8 +342,7 @@ function buildDOMObserverScript(customTexts, blockedCommands, allowedCommands, a
             var isExpandMatch = (matchedText === 'expand' || matchedText === 'requires input');
             if (isExpandMatch) {
                 var expandKey = 'expand:' + (btn.textContent || '').trim().toLowerCase().substring(0, 30);
-                clickCooldowns[expandKey] = Date.now();
-                lastExpandClickTime = Date.now(); // Global throttle
+                expandedOnce[expandKey] = true; // Permanently suppress re-clicks for this session
             } else {
                 var key = _domPath(btn) + ':' + (btn.textContent || '').trim().toLowerCase().substring(0, 30);
                 clickCooldowns[key] = Date.now();
