@@ -116,14 +116,22 @@ alias antigravity='antigravity --remote-debugging-port=9333'
 
 ## Multi-Agent Workflow
 
-Antigravity's IDE locks the agent chat panel to the sidebar, which means if you open two chat tabs, VS Code will completely unmount the hidden tab's DOM to save memory. 
+### ⚠️ Agent Manager Limitation
 
-To run multiple agents simultaneously and have the bot auto-click commands for all of them:
+Antigravity's Agent Manager uses a **single shared webview** — only the active conversation's DOM is rendered. Background conversations are completely unmounted. Both the VS Code Commands API and CDP can only reach the currently visible conversation.
+
+We verified this by decompiling Antigravity's source code: their accept command handlers are hardcoded to `vscode.window.activeTerminal` with zero arguments — there is no way to target a specific conversation.
+
+> **This is an Antigravity architectural limitation, not an extension bug.** It would require Antigravity to implement a cross-conversation accept command (e.g. `antigravity.agent.acceptAll`).
+
+### Workaround: Duplicate Workspace
+
+To run multiple agents with auto-accept on all of them:
 
 1. Click **File → Duplicate Workspace**
-2. This opens a second VS Code window connected to the same project
+2. This opens a second Antigravity window connected to the same project
 3. Start a chat in Window 1 and another chat in Window 2
-4. The extension's concurrent broadcast architecture will detect both webviews and **auto-click buttons in both windows simultaneously!**
+4. Each window has its own webview — the extension auto-clicks buttons in **both windows simultaneously**
 
 ## Settings
 
@@ -152,11 +160,8 @@ Antigravity's agent panel runs in an isolated Chromium process (OOPIF). The inje
 ### Heartbeat Self-Healing (v3.2.0)
 The CDP connection now validates existing sessions every heartbeat cycle (30s). If a session's MutationObserver is dead (execution context cleared by webview navigation or React hot-reload), it automatically re-injects the observer — no reconnection needed. Sessions unreachable 3 times consecutively are cleanly detached and pruned. *(Fixes the "stops clicking after ~1 hour" bug.)*
 
-### Expand Button Loop Prevention (v3.2.0)
-Three-layer defense prevents the Preview panel's "Expand" button from being repeatedly clicked in an infinite loop:
-1. **Strict interactive targeting** — expand must be a real `<button>` element, not any `<div>` with "expand" text
-2. **Text-based cooldown keys** — survives React re-renders that change DOM paths and invalidate path-based cooldowns
-3. **30s global expand throttle** — blocks all expand-type clicks for 30s, breaking the MutationObserver feedback loop
+### Expand Button Loop Prevention (v3.5.1)
+Expand-type buttons (e.g. browser preview "Expand") use a **click-once-per-session** rule: once clicked, they are permanently suppressed for that CDP session via an `expandedOnce` Set. This prevents the infinite overlay re-open loop where closing the expanded panel triggers a re-click. The state resets naturally when a new agent conversation starts.
 
 ### Button Detection
 Inside the agent panel, a `TreeWalker` searches for buttons by text content using `startsWith` matching with **word-boundary checks** to prevent false positives (e.g. `accept-test.js` won't match `accept`):
