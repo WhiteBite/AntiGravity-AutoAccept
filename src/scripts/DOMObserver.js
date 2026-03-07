@@ -77,8 +77,8 @@ function buildDOMObserverScript(customTexts, blockedCommands, allowedCommands, a
     window.__AA_PAUSED = false; // Kill switch: set to true to stop all clicking
 
     var COOLDOWN_MS = 5000;
+    var EXPAND_COOLDOWN_MS = 15000; // 15s cooldown for expand buttons (DOM-path-keyed, so new positions fire instantly)
     var clickCooldowns = {};
-    var expandedOnce = {}; // Click-once-per-session: expand buttons are never re-clicked
 
     // Lightweight DOM path: walks up to 3 ancestors to create a structurally unique key.
     // Differentiates multiple "Accept" buttons in different DOM subtrees.
@@ -172,7 +172,7 @@ function buildDOMObserverScript(customTexts, blockedCommands, allowedCommands, a
 
                 var clickable = closestClickable(wNode);
                 var tag2 = (clickable.tagName || '').toLowerCase();
-                var isExpandType = (text === 'expand' || text === 'requires input');
+                var isExpandType = (text === 'expand' && nodeText === 'expand') || text === 'requires input';
                 if (tag2 === 'button' || tag2 === 'a' || tag2.includes('button') || tag2.includes('btn') ||
                     clickable.getAttribute('role') === 'button' || clickable.getAttribute('role') === 'link' ||
                     clickable.classList.contains('cursor-pointer') ||
@@ -183,21 +183,12 @@ function buildDOMObserverScript(customTexts, blockedCommands, allowedCommands, a
                         continue;
                     }
 
-                    // Expand-specific guard: click-once-per-session
-                    // Once expanded, never re-click — prevents the overlay close → re-open loop (Issue #30)
-                    if (isExpandType) {
-                        var expandKey = 'expand:' + (clickable.textContent || '').trim().toLowerCase().substring(0, 30);
-                        if (expandedOnce[expandKey]) {
-                            continue;
-                        }
-                    } else {
-                        // Standard cooldown with DOM-path key (stable for non-expand buttons)
-                        var btnKey = _domPath(clickable) + ':' + (clickable.textContent || '').trim().toLowerCase().substring(0, 30);
-                        var cooldown = COOLDOWN_MS;
-                        var lastClick = clickCooldowns[btnKey] || 0;
-                        if (lastClick && (Date.now() - lastClick < cooldown)) {
-                            continue;
-                        }
+                    // Cooldown guard: DOM-path + text key, with longer cooldown for expand buttons
+                    var btnKey = _domPath(clickable) + ':' + (clickable.textContent || '').trim().toLowerCase().substring(0, 30);
+                    var cooldown = isExpandType ? EXPAND_COOLDOWN_MS : COOLDOWN_MS;
+                    var lastClick = clickCooldowns[btnKey] || 0;
+                    if (lastClick && (Date.now() - lastClick < cooldown)) {
+                        continue;
                     }
                     best = { node: clickable, matchedText: text, priority: t };
                     if (t === 0) return best; // Priority 0 — can't do better
