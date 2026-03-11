@@ -143,13 +143,19 @@ function startPolling() {
 
     const config = vscode.workspace.getConfiguration('autoAcceptV2');
     const interval = config.get('pollInterval', 500);
-    const activeCommands = getActiveCommands();
-    log(`Polling started (every ${interval}ms, ${activeCommands.length} commands)`);
+    log(`Polling started (every ${interval}ms)`);
 
     let consecutiveErrors = 0;
+    let pollRunning = false; // Bug 5 fix: re-entrancy lock
     // Recursive setTimeout pattern — guarantees strict sequential execution.
     async function pollCycle() {
         if (!isEnabled) return;
+        // Bug 5 fix: skip if previous cycle is still running (3s timeout race)
+        if (pollRunning) {
+            if (isEnabled) pollIntervalId = setTimeout(pollCycle, interval);
+            return;
+        }
+        pollRunning = true;
         try {
             // Re-read active commands each cycle so config changes take effect live.
             // Inside try/catch: if getActiveCommands throws (e.g. extension host crash),
@@ -166,6 +172,8 @@ function startPolling() {
             if (consecutiveErrors <= 3 || consecutiveErrors % 10 === 0) {
                 log(`[Poll] Error (${consecutiveErrors}x): ${e.message}`);
             }
+        } finally {
+            pollRunning = false;
         }
         if (isEnabled) {
             // Exponential backoff with ±20% jitter on persistent failures (caps at 30s).

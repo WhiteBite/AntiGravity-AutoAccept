@@ -168,7 +168,17 @@ function buildDOMObserverScript(customTexts, blockedCommands, allowedCommands, a
                 }
             }
             var nodeText = (wNode.textContent || '').trim().toLowerCase();
-            if (nodeText.length > 50) continue;
+            if (nodeText.length > 50) {
+                // Bug 7 fix: log when a potential match is dropped due to length
+                for (var lt = 0; lt < texts.length; lt++) {
+                    if (nodeText.indexOf(texts[lt]) !== -1) {
+                        if (!window.__AA_DIAG) window.__AA_DIAG = [];
+                        window.__AA_DIAG.push({ action: 'SKIP_LONG_TEXT', matched: texts[lt], len: nodeText.length, preview: nodeText.substring(0, 60) });
+                        break;
+                    }
+                }
+                continue;
+            }
 
             // Check this node against ALL keywords in a single iteration
             for (var t = 0; t < texts.length; t++) {
@@ -209,7 +219,10 @@ function buildDOMObserverScript(customTexts, blockedCommands, allowedCommands, a
                     }
 
                     // Cooldown guard: DOM-path + text key, with longer cooldown for expand buttons
-                    var btnKey = _domPath(clickable) + ':' + (clickable.textContent || '').trim().toLowerCase().substring(0, 30);
+                    // Bug 6 fix: use unified key format (include ':expand:' for expand types)
+                    var btnKey = isExpandType
+                        ? _domPath(clickable) + ':expand:' + (clickable.textContent || '').trim().toLowerCase().substring(0, 30)
+                        : _domPath(clickable) + ':' + (clickable.textContent || '').trim().toLowerCase().substring(0, 30);
                     var cooldown = isExpandType ? EXPAND_COOLDOWN_MS : COOLDOWN_MS;
                     var lastClick = clickCooldowns[btnKey] || 0;
                     if (lastClick && (Date.now() - lastClick < cooldown)) {
@@ -488,18 +501,21 @@ function buildDOMObserverScript(customTexts, blockedCommands, allowedCommands, a
 
         // Failsafe: periodic scan for buttons that bypass MutationObserver
         // (e.g. CSS visibility toggles, React virtual DOM anomalies).
-        // Uses requestIdleCallback to avoid blocking the main thread.
+        // Bug 3 fix: use setTimeout instead of requestIdleCallback — rIC never fires
+        // when the webview is backgrounded in Chromium, making the fallback dead.
+        // Bug 1/2 fix: update __AA_LAST_SCAN in the fallback BEFORE scanning so the
+        // heartbeat watchdog never expires during idle (no mutations = no scan = stale timestamp).
         // Clear any existing interval to prevent duplicates on re-injection.
         if (window.__AA_FALLBACK_INTERVAL) {
             clearInterval(window.__AA_FALLBACK_INTERVAL);
         }
         window.__AA_FALLBACK_INTERVAL = setInterval(function() {
             if (window.__AA_PAUSED) return;
-            if ('requestIdleCallback' in window) {
-                requestIdleCallback(function() { scanAndClick(); }, { timeout: 2000 });
-            } else {
-                setTimeout(function() { scanAndClick(); }, 0);
-            }
+            // Keep watchdog alive even when idle — proves the interval is running
+            window.__AA_LAST_SCAN = Date.now();
+            setTimeout(function() {
+                try { scanAndClick(); } catch(e) { _log('fallback scan error:', e.message); }
+            }, 0);
         }, 10000);
 
         // Expose observer on window for external disconnect (kill switch)

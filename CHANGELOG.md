@@ -1,5 +1,31 @@
 # Changelog
 
+## [3.8.0] — 2026-03-11
+
+### Bug Fixes — Idle Failure (Root Cause)
+- **Fixed** extension silently dying after 2+ minutes of idle. The fallback scan used `requestIdleCallback` which **never fires** in backgrounded Chromium webviews — the 10-second safety net was completely dead. Replaced with `setTimeout`.
+- **Fixed** watchdog false-positive: the heartbeat declared the observer "dead" after 120s of no DOM mutations (idle = no scans = stale `__AA_LAST_SCAN`). The fallback interval now updates the timestamp on every tick, proving liveness even when idle.
+- **Fixed** fallback interval lost on re-injection race: if re-injection returned `'already-active'`, the old interval was cleared but no new one was installed.
+
+### Bug Fixes — Reliability
+- **Fixed** heartbeat stacking after system sleep/resume. Replaced `setInterval` with recursive `setTimeout` — guarantees only one heartbeat runs at a time.
+- **Added** WebSocket ping/pong keepalive (45s ping, 10s pong timeout) to detect zombie connections after laptop sleep.
+- **Fixed** expand button cooldown key mismatch — `findButton` and `scanAndClick` used different key formats, silently bypassing the 30s cooldown.
+- **Fixed** poll cycle re-entrancy — overlapping command executions when extension host is slow (3s timeout race).
+- **Fixed** click leaks when toggled off: `_reinjectForSession` now respects `isPaused` state.
+- **Removed** dead `activeCommands` variable in `startPolling()`.
+
+### Bug Fixes — Issue #36 (Browser Sub-Agent Conflict)
+- **Fixed** "Cannot freeze array buffer views with elements" error when using the browser sub-agent. The extension was attaching to **all** page targets including `http://`/`https://` pages opened by the sub-agent, causing competing CDP commands. Now filters out non-webview page targets.
+
+### Diagnostics
+- **Added** `SKIP_LONG_TEXT` diagnostic entry when a potential button match is dropped by the 50-character text filter — previously silently ignored.
+
+### Dashboard
+- **Fixed** command filter escaping vulnerability — replaced fragile inline `onclick` string concatenation with data-attribute event delegation.
+
+---
+
 ## [3.7.8] — 2026-03-10
 
 ### Bug Fixes

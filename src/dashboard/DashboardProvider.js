@@ -485,16 +485,23 @@ class DashboardProvider {
             el.innerHTML = '<span class="empty-note">No patterns configured</span>';
             return;
         }
-        el.innerHTML = items.map(item =>
+        // Bug 15 fix: use data attributes + event delegation instead of
+        // fragile inline onclick string escaping
+        el.innerHTML = items.map((item, i) =>
             '<span class="tag">' +
             '<code>' + escHtml(item) + '</code>' +
-            '<span class="remove" onclick="' + removeHandler + '(\\'' + escAttr(item) + '\\')">&times;</span>' +
+            '<span class="remove" data-idx="' + i + '">&times;</span>' +
             '</span>'
         ).join('');
+        el.querySelectorAll('.remove[data-idx]').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                var idx = parseInt(this.getAttribute('data-idx'), 10);
+                if (window[removeHandler]) window[removeHandler](items[idx]);
+            });
+        });
     }
 
     function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-    function escAttr(s) { return s.replace(/'/g,"\\\\'").replace(/"/g,'&quot;'); }
 
     function updateUI(data) {
         state = data;

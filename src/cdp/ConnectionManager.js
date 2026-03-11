@@ -43,6 +43,8 @@ class ConnectionManager {
         this.onStatusChange = null; // Callback when CDP status changes
         this.onClickTelemetry = null; // Callback with click delta for analytics
         this._sessionFailCounts = new Map(); // Consecutive heartbeat failures per targetId
+        this._heartbeatRunning = false; // Re-entrancy guard for heartbeat (Bug 8)
+        this._pingTimer = null; // WebSocket keepalive ping interval (Bug 9)
     }
 
     /**
@@ -169,8 +171,10 @@ class ConnectionManager {
         this.isPaused = false;
         clearTimeout(this.reconnectTimer);
         this.reconnectTimer = null;
-        clearInterval(this.heartbeatTimer);
+        clearTimeout(this.heartbeatTimer);
         this.heartbeatTimer = null;
+        clearInterval(this._pingTimer);
+        this._pingTimer = null;
         this._disableObservers();
         this._closeWebSocket();
         this.sessions.clear();
@@ -237,7 +241,12 @@ class ConnectionManager {
                     await this._initializeTargetDiscovery();
 
                     // Heartbeat: periodic health check + new target discovery
-                    this.heartbeatTimer = setInterval(() => this._heartbeat(), 30000);
+                    // Bug 8 fix: use recursive setTimeout instead of setInterval
+                    // to prevent stacked heartbeats after system sleep/resume
+                    this._scheduleHeartbeat();
+
+                    // Bug 9 fix: WebSocket ping/pong keepalive for zombie detection
+                    this._startPingPong();
 
                     resolve();
                 } catch (e) {
@@ -310,8 +319,10 @@ class ConnectionManager {
             this.ignoredTargets.clear();
             this._sessionFailCounts.clear();
             this._clearPending();
-            clearInterval(this.heartbeatTimer);
+            clearTimeout(this.heartbeatTimer);
             this.heartbeatTimer = null;
+            clearInterval(this._pingTimer);
+            this._pingTimer = null;
             if (this.onStatusChange) this.onStatusChange();
         } catch (e) {
             this.log(`[CDP] Teardown error (non-fatal): ${e.message}`);
@@ -346,6 +357,12 @@ class ConnectionManager {
         if (!url) return false;
         // Skip service workers and web workers — they have no DOM or window
         if (type === 'service_worker' || type === 'worker' || type === 'shared_worker') return false;
+        // Issue #36 fix: skip regular web pages (http/https) — these belong to the
+        // browser sub-agent (Playwright). Attaching to them causes "Cannot freeze
+        // array buffer views" errors because both our extension and the sub-agent
+        // issue competing CDP commands on the same targets.
+        // We only need VS Code webview targets (vscode-webview://) and iframes.
+        if (type === 'page' && (url.startsWith('http://') || url.startsWith('https://'))) return false;
         return type === 'page' ||
             url.includes('vscode-webview://') ||
             url.includes('webview') ||
@@ -524,6 +541,13 @@ class ConnectionManager {
         }
         if (!targetId) return;
 
+        // Bug 13 fix: don't re-inject active observer when extension is paused
+        // Prevents click leaks between re-injection and pause flag propagation
+        if (this.isPaused) {
+            this.log(`[CDP] [${targetId.substring(0, 6)}] Skipping re-inject — extension is paused`);
+            return;
+        }
+
         const shortId = targetId.substring(0, 6);
 
         // Bounded retry: poll for a valid execution context instead of a
@@ -596,6 +620,51 @@ class ConnectionManager {
             this.reconnectTimer = null;
             if (this.isRunning) this.connect();
         }, 3000);
+    }
+
+    /**
+     * Bug 8 fix: recursive setTimeout for heartbeat — prevents stacking after sleep.
+     * setInterval fires multiple stacked callbacks on wake; setTimeout guarantees
+     * only one heartbeat runs at a time.
+     */
+    _scheduleHeartbeat() {
+        clearTimeout(this.heartbeatTimer);
+        this.heartbeatTimer = setTimeout(async () => {
+            await this._heartbeat();
+            if (this.isRunning && this.ws) {
+                this._scheduleHeartbeat();
+            }
+        }, 30000);
+    }
+
+    /**
+     * Bug 9 fix: WebSocket ping/pong keepalive.
+     * Detects zombie connections (TCP dead but readyState still OPEN) after
+     * system sleep. Sends a WS-level ping every 45s; if no pong within 10s,
+     * forces reconnect.
+     */
+    _startPingPong() {
+        clearInterval(this._pingTimer);
+        this._pingTimer = setInterval(() => {
+            if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+            let pongReceived = false;
+            const pongHandler = () => { pongReceived = true; };
+            this.ws.once('pong', pongHandler);
+            try {
+                this.ws.ping();
+            } catch (e) {
+                this.ws.removeListener('pong', pongHandler);
+                return;
+            }
+            setTimeout(() => {
+                this.ws?.removeListener('pong', pongHandler);
+                if (!pongReceived && this.ws) {
+                    this.log('[CDP] ⚠ No pong received — zombie connection detected, forcing reconnect');
+                    this._closeWebSocket();
+                    this._onClose();
+                }
+            }, 10000);
+        }, 45000);
     }
 
     async _heartbeat() {
