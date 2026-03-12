@@ -5,8 +5,38 @@
 const vscode = require('vscode');
 const cp = require('child_process');
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const { ConnectionManager } = require('./cdp/ConnectionManager');
 const { DashboardProvider } = require('./dashboard/DashboardProvider');
+
+// ─── Persistent Memory Logger (survives OOM crash) ────────────────
+let _memLogTimer = null;
+const MEM_LOG_PATH = path.join(require('os').tmpdir(), 'aa-memory.log');
+
+function startMemoryLogger() {
+    // Truncate old log on start
+    try { fs.writeFileSync(MEM_LOG_PATH, `--- AutoAccept Memory Log (PID ${process.pid}) ---\n`); } catch (e) { }
+    _memLogTimer = setInterval(() => {
+        try {
+            const mem = process.memoryUsage();
+            const heap = Math.round(mem.heapUsed / 1024 / 1024);
+            const rss = Math.round(mem.rss / 1024 / 1024);
+            const ext = Math.round((mem.external || 0) / 1024 / 1024);
+            const ab = Math.round((mem.arrayBuffers || 0) / 1024 / 1024);
+            const sessions = connectionManager ? connectionManager.sessions.size : 0;
+            const ignored = connectionManager ? connectionManager.ignoredTargets.size : 0;
+            const pending = connectionManager ? connectionManager._pendingIpc.size : 0;
+            const line = `${new Date().toISOString()} | heap=${heap}MB rss=${rss}MB ext=${ext}MB ab=${ab}MB | sessions=${sessions} ignored=${ignored} pending=${pending}\n`;
+            fs.appendFileSync(MEM_LOG_PATH, line);
+        } catch (e) { }
+    }, 30000); // Every 30s
+}
+
+function stopMemoryLogger() {
+    clearInterval(_memLogTimer);
+    _memLogTimer = null;
+}
 
 // ─── VS Code Commands ─────────────────────────────────────────────────
 // Only Antigravity-specific commands — generic VS Code commands like
@@ -354,7 +384,9 @@ else { Write-Output "NOT_FOUND" }
 // ─── Activation ───────────────────────────────────────────────────────
 function activate(context) {
     outputChannel = vscode.window.createOutputChannel('AntiGravity AutoAccept');
-    log('Extension activating (v3.0.0)');
+    log('Extension activating (v3.9.9)');
+    startMemoryLogger();
+    log(`[MEM] Memory log: ${MEM_LOG_PATH}`);
 
     // Initialize persistent CDP connection manager
     connectionManager = new ConnectionManager({
@@ -521,6 +553,7 @@ function activate(context) {
 }
 
 function deactivate() {
+    stopMemoryLogger();
     stopPolling();
     if (connectionManager) connectionManager.stop(); // Full teardown on deactivation
     if (outputChannel) outputChannel.dispose();

@@ -1,16 +1,17 @@
-// AntiGravity AutoAccept — CDP Worker Process
-// Runs in a child process via child_process.fork().
-// Owns ALL ws WebSocket instances — the main extension process has zero.
-// Communicates with the main extension via IPC (process.send/on).
+// AntiGravity AutoAccept — CDP Worker Thread
+// Runs in a worker_thread (NOT child_process.fork).
+// Owns ALL ws WebSocket instances — the main extension thread has zero.
+// Communicates via worker_threads.parentPort.
 
+const { parentPort } = require('worker_threads');
 const WebSocket = require('ws');
 
-// ─── P1: Memory Monitoring ───────────────────────────────────────
+// ─── Memory Monitoring (60s) ─────────────────────────────────────
 
 setInterval(() => {
-    const mem = process.memoryUsage();
     try {
-        process.send({
+        const mem = process.memoryUsage();
+        parentPort.postMessage({
             type: 'memory-report',
             heapUsed: Math.round(mem.heapUsed / 1024 / 1024),
             rss: Math.round(mem.rss / 1024 / 1024)
@@ -18,28 +19,43 @@ setInterval(() => {
     } catch (e) { }
 }, 60000);
 
-// ─── IPC Message Handler ──────────────────────────────────────────
+// ─── Cached Script ───────────────────────────────────────────────
+let _cachedScript = null;
 
-process.on('message', async (msg) => {
+// ─── Message Handler ─────────────────────────────────────────────
+
+parentPort.on('message', async (msg) => {
     switch (msg.type) {
+        case 'cache-script': {
+            _cachedScript = msg.script;
+            parentPort.postMessage({ type: 'cache-script-ack', id: msg.id });
+            break;
+        }
+
         case 'eval': {
             const { id, wsUrl, expression } = msg;
             try {
                 const result = await burstEval(wsUrl, expression);
-                process.send({ type: 'eval-result', id, result });
+                parentPort.postMessage({ type: 'eval-result', id, result });
             } catch (e) {
-                process.send({ type: 'eval-result', id, error: e.message });
+                parentPort.postMessage({ type: 'eval-result', id, error: e.message });
             }
             break;
         }
 
         case 'burst-inject': {
-            const { id, wsUrl, targetId, script, isPaused } = msg;
+            const { id, wsUrl, targetId, isPaused } = msg;
+            // Use msg.script if provided, otherwise use cached script
+            const script = msg.script || _cachedScript;
+            if (!script) {
+                parentPort.postMessage({ type: 'burst-inject-result', id, targetId, error: 'no script cached' });
+                break;
+            }
             try {
                 const result = await burstInject(wsUrl, targetId, script, isPaused);
-                process.send({ type: 'burst-inject-result', id, targetId, result });
+                parentPort.postMessage({ type: 'burst-inject-result', id, targetId, result });
             } catch (e) {
-                process.send({ type: 'burst-inject-result', id, targetId, error: e.message });
+                parentPort.postMessage({ type: 'burst-inject-result', id, targetId, error: e.message });
             }
             break;
         }
@@ -101,7 +117,7 @@ function burstEval(wsUrl, expression) {
     });
 }
 
-// ─── Multi-step Burst Inject (P0: single message listener) ───────
+// ─── Multi-step Burst Inject (single message listener) ───────────
 
 function burstInject(wsUrl, targetId, script, isPaused) {
     return new Promise(async (resolve, reject) => {
@@ -113,11 +129,8 @@ function burstInject(wsUrl, targetId, script, isPaused) {
             return;
         }
 
-        // P0 Fix: Single message listener routed by ID.
-        // Previous version added a NEW listener per send() call, causing
-        // listener accumulation if inner timeouts fired before cleanup.
         let id = 0;
-        const pending = new Map(); // id → { resolve, reject, timer }
+        const pending = new Map();
 
         const messageHandler = (raw) => {
             try {
@@ -145,7 +158,6 @@ function burstInject(wsUrl, targetId, script, isPaused) {
         };
 
         try {
-            // Pre-check: window/document
             const windowCheck = await send('Runtime.evaluate', {
                 expression: 'typeof window !== "undefined" && typeof document !== "undefined"'
             });
@@ -154,19 +166,16 @@ function burstInject(wsUrl, targetId, script, isPaused) {
                 return;
             }
 
-            // Force-clear stale observer
             await send('Runtime.evaluate', {
                 expression: 'if (typeof window !== "undefined") { if (typeof window.__AA_CLEANUP === "function") window.__AA_CLEANUP(); window.__AA_OBSERVER_ACTIVE = false; }'
             });
 
-            // Inject MutationObserver script
             const evalMsg = await send('Runtime.evaluate', { expression: script });
             if (evalMsg.error) { resolve('cdp-error'); return; }
             const exDesc = evalMsg.result?.exceptionDetails;
             if (exDesc) { resolve('script-exception'); return; }
             const result = evalMsg.result?.result?.value || 'undefined';
 
-            // If extension is paused, set pause flag
             if (isPaused && (result === 'observer-installed' || result === 'already-active')) {
                 await send('Runtime.evaluate', {
                     expression: 'window.__AA_PAUSED = true; "paused-on-inject"'
@@ -177,10 +186,7 @@ function burstInject(wsUrl, targetId, script, isPaused) {
         } catch (e) {
             reject(e);
         } finally {
-            // Clean up ALL pending handlers and the single listener
-            for (const [, handler] of pending) {
-                clearTimeout(handler.timer);
-            }
+            for (const [, handler] of pending) clearTimeout(handler.timer);
             pending.clear();
             ws.removeAllListeners();
             try { ws.close(); } catch (e) { }
@@ -209,7 +215,3 @@ function openSocket(wsUrl) {
         });
     });
 }
-
-// Keep child alive
-process.on('disconnect', () => process.exit(0));
-process.on('SIGTERM', () => process.exit(0));

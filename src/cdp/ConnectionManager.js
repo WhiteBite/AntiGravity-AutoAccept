@@ -1,12 +1,13 @@
 // AntiGravity AutoAccept — CDP Connection Manager
-// Child process isolation: all ws WebSocket instances live in a forked
-// child process (cdp-worker.js). The main extension process has ZERO
+// Worker thread isolation: all ws WebSocket instances live in a
+// worker_thread (cdp-worker.js). The main extension thread has ZERO
 // WebSocket instances, making it immune to the "Cannot freeze array
 // buffer views with elements" crash (issue #36).
+// Memory-optimized: ~2-5MB per worker thread vs ~30-50MB per fork().
 
 const http = require('http');
 const path = require('path');
-const { fork } = require('child_process');
+const { Worker } = require('worker_threads');
 const { buildDOMObserverScript } = require('../scripts/DOMObserver');
 
 class ConnectionManager {
@@ -15,7 +16,7 @@ class ConnectionManager {
         this.getPort = getPort;
         this.getCustomTexts = getCustomTexts;
 
-        // Tracked targets (metadata only — no sockets in this process)
+        // Tracked targets (metadata only — no sockets in this thread)
         this.sessions = new Map();          // targetId → { url, wsUrl }
         this.sessionUrls = new Map();       // targetId → url (compat)
         this.ignoredTargets = new Set();
@@ -38,10 +39,15 @@ class ConnectionManager {
         this._heartbeatRunning = false;
         this._injectionFailCounts = new Map();
 
-        // Child process (owns all WebSocket instances)
+        // Worker thread (owns all WebSocket instances)
         this._worker = null;
         this._pendingIpc = new Map();
         this._ipcId = 0;
+        this._idleKillTimer = null;
+
+        // Script caching (eliminates 28KB IPC churn per heartbeat)
+        this._cachedScript = null;
+        this._cachedScriptKey = null; // hash of inputs to detect changes
 
         // Compat shim
         this._connected = false;
@@ -51,13 +57,41 @@ class ConnectionManager {
         return this._connected ? { readyState: 1 } : null;
     }
 
-    // ─── Child Process Management ─────────────────────────────────────
+    // ─── Script Cache ─────────────────────────────────────────────────
+
+    _getScript() {
+        const key = JSON.stringify({
+            custom: this.getCustomTexts(),
+            blocked: this.blockedCommands,
+            allowed: this.allowedCommands,
+            fileEdits: this.autoAcceptFileEdits
+        });
+        if (this._cachedScriptKey === key && this._cachedScript) {
+            return this._cachedScript;
+        }
+        this._cachedScript = buildDOMObserverScript(
+            this.getCustomTexts(), this.blockedCommands, this.allowedCommands, this.autoAcceptFileEdits
+        );
+        this._cachedScriptKey = key;
+        // Push to worker if alive
+        if (this._worker) {
+            this._worker.postMessage({ type: 'cache-script', id: 0, script: this._cachedScript });
+        }
+        this.log('[CDP] Script cached (config changed)');
+        return this._cachedScript;
+    }
+
+    _invalidateScriptCache() {
+        this._cachedScriptKey = null;
+    }
+
+    // ─── Worker Thread Management ─────────────────────────────────────
 
     _ensureWorker() {
-        if (this._worker && !this._worker.killed) return this._worker;
+        if (this._worker) return this._worker;
 
         const workerPath = path.join(__dirname, 'cdp-worker.js');
-        this._worker = fork(workerPath, [], { silent: true });
+        this._worker = new Worker(workerPath);
 
         this._worker.on('message', (msg) => {
             // Worker memory report (P1 monitoring)
@@ -91,20 +125,17 @@ class ConnectionManager {
             this.log(`[CDP] Worker error: ${e.message}`);
         });
 
-        if (this._worker.stdout) {
-            this._worker.stdout.on('data', (d) => this.log(`[Worker] ${d.toString().trim()}`));
-        }
-        if (this._worker.stderr) {
-            this._worker.stderr.on('data', (d) => this.log(`[Worker ERR] ${d.toString().trim()}`));
+        // Send cached script to worker immediately
+        if (this._cachedScript) {
+            this._worker.postMessage({ type: 'cache-script', id: 0, script: this._cachedScript });
         }
 
-        this.log('[CDP] Worker process spawned');
+        this.log('[CDP] Worker thread spawned');
         return this._worker;
     }
 
     _workerEval(wsUrl, expression) {
         return new Promise((resolve, reject) => {
-            // P0: Guard against _pendingIpc accumulation
             if (this._pendingIpc.size > 20) {
                 reject(new Error('ipc backpressure: too many pending calls'));
                 return;
@@ -116,13 +147,12 @@ class ConnectionManager {
                 reject(new Error('ipc timeout'));
             }, 10000);
             this._pendingIpc.set(id, { resolve, reject, timer });
-            worker.send({ type: 'eval', id, wsUrl, expression });
+            worker.postMessage({ type: 'eval', id, wsUrl, expression });
         });
     }
 
-    _workerBurstInject(wsUrl, targetId, script, isPaused) {
+    _workerBurstInject(wsUrl, targetId, isPaused) {
         return new Promise((resolve, reject) => {
-            // P0: Guard against _pendingIpc accumulation
             if (this._pendingIpc.size > 20) {
                 reject(new Error('ipc backpressure: too many pending calls'));
                 return;
@@ -134,31 +164,39 @@ class ConnectionManager {
                 reject(new Error('ipc timeout'));
             }, 15000);
             this._pendingIpc.set(id, { resolve, reject, timer });
-            worker.send({ type: 'burst-inject', id, wsUrl, targetId, script, isPaused });
+            // Worker uses cached script — no need to send 28KB every time
+            worker.postMessage({ type: 'burst-inject', id, wsUrl, targetId, isPaused });
         });
     }
 
     _killWorker() {
-        if (this._worker && !this._worker.killed) {
-            try { this._worker.send({ type: 'shutdown' }); } catch (e) { }
+        if (this._worker) {
+            try { this._worker.postMessage({ type: 'shutdown' }); } catch (e) { }
             setTimeout(() => {
-                if (this._worker && !this._worker.killed) {
-                    this._worker.kill();
+                if (this._worker) {
+                    try { this._worker.terminate(); } catch (e) { }
                 }
             }, 1000);
         }
         this._worker = null;
     }
 
-    // P0: Periodic worker recycling to prevent memory accumulation
-    _scheduleWorkerRecycle() {
-        clearInterval(this._recycleTimer);
-        this._recycleTimer = setInterval(() => {
-            if (!this.isRunning) return;
-            this.log('[CDP] Recycling worker process (30min memory hygiene)');
-            this._killWorker();
-            // Worker auto-respawns on next _ensureWorker() call (next heartbeat)
-        }, 30 * 60 * 1000); // 30 minutes
+    // P2: setTimeout debounce idle kill (not setInterval)
+    _resetIdleTimer() {
+        if (this._idleKillTimer) {
+            clearTimeout(this._idleKillTimer);
+            this._idleKillTimer = null;
+        }
+        // Only start countdown when completely idle
+        if (this.sessions.size === 0 && this._pendingIpc.size === 0 && this._worker) {
+            this._idleKillTimer = setTimeout(() => {
+                if (this._worker && this.sessions.size === 0 && this._pendingIpc.size === 0) {
+                    this.log('[CDP] No sessions for 60s, killing idle worker');
+                    this._killWorker();
+                }
+                this._idleKillTimer = null;
+            }, 60000);
+        }
     }
 
     // ─── Public API ───────────────────────────────────────────────────
@@ -166,6 +204,7 @@ class ConnectionManager {
     setCommandFilters(blocked, allowed) {
         this.blockedCommands = blocked || [];
         this.allowedCommands = allowed || [];
+        this._invalidateScriptCache();
     }
 
     async pushFilterUpdate(blocked, allowed) {
@@ -187,12 +226,10 @@ class ConnectionManager {
 
     async reinjectAll() {
         if (this.sessions.size === 0) return;
-        const script = buildDOMObserverScript(
-            this.getCustomTexts(), this.blockedCommands, this.allowedCommands, this.autoAcceptFileEdits
-        );
+        const script = this._getScript();
         for (const [targetId, info] of this.sessions) {
             try {
-                const msg = await this._workerBurstInject(info.wsUrl, targetId, script, this.isPaused);
+                const msg = await this._workerBurstInject(info.wsUrl, targetId, this.isPaused);
                 const result = msg.result || 'unknown';
                 this.log(`[CDP] Re-injected [${targetId.substring(0, 6)}] → ${result}`);
             } catch (e) {
@@ -205,8 +242,7 @@ class ConnectionManager {
         if (this.isRunning) return;
         this.isRunning = true;
         this.isPaused = false;
-        this.log('[CDP] Connection manager starting (child process isolation)');
-        this._scheduleWorkerRecycle();
+        this.log('[CDP] Connection manager starting (worker thread isolation)');
         this.connect();
     }
 
@@ -235,8 +271,8 @@ class ConnectionManager {
         this.reconnectTimer = null;
         clearTimeout(this.heartbeatTimer);
         this.heartbeatTimer = null;
-        clearInterval(this._recycleTimer);
-        this._recycleTimer = null;
+        clearTimeout(this._idleKillTimer);
+        this._idleKillTimer = null;
         for (const [targetId, info] of this.sessions) {
             this._workerEval(info.wsUrl, `
                 window.__AA_PAUSED = true;
@@ -280,10 +316,14 @@ class ConnectionManager {
             const candidates = targets.filter(t => this._isCandidate(t));
             this.log(`[CDP] Found ${targets.length} targets, ${candidates.length} candidates`);
 
+            // Pre-cache script before injecting
+            this._getScript();
+
             await Promise.allSettled(candidates.map(t => this._handleNewTarget(t)));
 
             this.log(`[CDP] ${this.sessions.size} sessions active after initial scan`);
             this._scheduleHeartbeat();
+            this._resetIdleTimer();
         } catch (e) {
             this.log(`[CDP] Connection error: ${e.message}`);
             this._scheduleReconnect();
@@ -321,10 +361,9 @@ class ConnectionManager {
         }
 
         try {
-            const script = buildDOMObserverScript(
-                this.getCustomTexts(), this.blockedCommands, this.allowedCommands, this.autoAcceptFileEdits
-            );
-            const msg = await this._workerBurstInject(webSocketDebuggerUrl, targetId, script, this.isPaused);
+            // Use cached script — no 28KB allocation per target
+            this._getScript();
+            const msg = await this._workerBurstInject(webSocketDebuggerUrl, targetId, this.isPaused);
             const result = msg.result || 'unknown';
 
             if (result !== 'observer-installed' && result !== 'already-active') {
@@ -400,18 +439,22 @@ class ConnectionManager {
                 }
             }
 
-            // P0: Prune ignoredTargets of dead target IDs
+            // Prune ignoredTargets of dead target IDs
             for (const tid of this.ignoredTargets) {
                 if (!activeIds.has(tid)) this.ignoredTargets.delete(tid);
             }
 
-            // P0: Prune _injectionFailCounts of dead target IDs
+            // Prune _injectionFailCounts of dead target IDs
             for (const [tid] of this._injectionFailCounts) {
                 if (!activeIds.has(tid)) this._injectionFailCounts.delete(tid);
             }
 
             // Health check existing sessions
-            if (this.sessions.size === 0) { this._heartbeatRunning = false; return; }
+            if (this.sessions.size === 0) {
+                this._resetIdleTimer();
+                this._heartbeatRunning = false;
+                return;
+            }
 
             const entries = [...this.sessions.entries()];
             const results = await Promise.allSettled(
@@ -447,10 +490,8 @@ class ConnectionManager {
                     if (!value.alive) {
                         this.log(`[CDP] Session [${shortId}] observer dead, re-injecting...`);
                         try {
-                            const script = buildDOMObserverScript(
-                                this.getCustomTexts(), this.blockedCommands, this.allowedCommands, this.autoAcceptFileEdits
-                            );
-                            const msg = await this._workerBurstInject(info.wsUrl, targetId, script, this.isPaused);
+                            this._getScript(); // Ensure cache is fresh
+                            const msg = await this._workerBurstInject(info.wsUrl, targetId, this.isPaused);
                             const result = msg.result || 'unknown';
                             if (result === 'not-agent-panel') {
                                 dead.push(targetId); this.ignoredTargets.add(targetId);
@@ -480,6 +521,8 @@ class ConnectionManager {
                 this.sessionUrls.delete(tid);
                 this._sessionFailCounts.delete(tid);
             }
+
+            this._resetIdleTimer();
         } catch (e) { } finally { this._heartbeatRunning = false; }
     }
 
