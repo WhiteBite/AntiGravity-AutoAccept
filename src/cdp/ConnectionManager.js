@@ -60,6 +60,11 @@ class ConnectionManager {
         this._worker = fork(workerPath, [], { silent: true });
 
         this._worker.on('message', (msg) => {
+            // Worker memory report (P1 monitoring)
+            if (msg.type === 'memory-report') {
+                this.log(`[CDP] Worker memory: heap=${msg.heapUsed}MB rss=${msg.rss}MB`);
+                return;
+            }
             if (msg.id && this._pendingIpc.has(msg.id)) {
                 const handler = this._pendingIpc.get(msg.id);
                 this._pendingIpc.delete(msg.id);
@@ -99,6 +104,11 @@ class ConnectionManager {
 
     _workerEval(wsUrl, expression) {
         return new Promise((resolve, reject) => {
+            // P0: Guard against _pendingIpc accumulation
+            if (this._pendingIpc.size > 20) {
+                reject(new Error('ipc backpressure: too many pending calls'));
+                return;
+            }
             const worker = this._ensureWorker();
             const id = ++this._ipcId;
             const timer = setTimeout(() => {
@@ -112,6 +122,11 @@ class ConnectionManager {
 
     _workerBurstInject(wsUrl, targetId, script, isPaused) {
         return new Promise((resolve, reject) => {
+            // P0: Guard against _pendingIpc accumulation
+            if (this._pendingIpc.size > 20) {
+                reject(new Error('ipc backpressure: too many pending calls'));
+                return;
+            }
             const worker = this._ensureWorker();
             const id = ++this._ipcId;
             const timer = setTimeout(() => {
@@ -133,6 +148,17 @@ class ConnectionManager {
             }, 1000);
         }
         this._worker = null;
+    }
+
+    // P0: Periodic worker recycling to prevent memory accumulation
+    _scheduleWorkerRecycle() {
+        clearInterval(this._recycleTimer);
+        this._recycleTimer = setInterval(() => {
+            if (!this.isRunning) return;
+            this.log('[CDP] Recycling worker process (30min memory hygiene)');
+            this._killWorker();
+            // Worker auto-respawns on next _ensureWorker() call (next heartbeat)
+        }, 30 * 60 * 1000); // 30 minutes
     }
 
     // ─── Public API ───────────────────────────────────────────────────
@@ -180,6 +206,7 @@ class ConnectionManager {
         this.isRunning = true;
         this.isPaused = false;
         this.log('[CDP] Connection manager starting (child process isolation)');
+        this._scheduleWorkerRecycle();
         this.connect();
     }
 
@@ -208,6 +235,8 @@ class ConnectionManager {
         this.reconnectTimer = null;
         clearTimeout(this.heartbeatTimer);
         this.heartbeatTimer = null;
+        clearInterval(this._recycleTimer);
+        this._recycleTimer = null;
         for (const [targetId, info] of this.sessions) {
             this._workerEval(info.wsUrl, `
                 window.__AA_PAUSED = true;
@@ -369,6 +398,16 @@ class ConnectionManager {
                     this._sessionFailCounts.delete(targetId);
                     this.log(`[CDP] Target [${targetId.substring(0, 6)}] gone, pruned`);
                 }
+            }
+
+            // P0: Prune ignoredTargets of dead target IDs
+            for (const tid of this.ignoredTargets) {
+                if (!activeIds.has(tid)) this.ignoredTargets.delete(tid);
+            }
+
+            // P0: Prune _injectionFailCounts of dead target IDs
+            for (const [tid] of this._injectionFailCounts) {
+                if (!activeIds.has(tid)) this._injectionFailCounts.delete(tid);
             }
 
             // Health check existing sessions

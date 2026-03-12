@@ -5,6 +5,19 @@
 
 const WebSocket = require('ws');
 
+// ─── P1: Memory Monitoring ───────────────────────────────────────
+
+setInterval(() => {
+    const mem = process.memoryUsage();
+    try {
+        process.send({
+            type: 'memory-report',
+            heapUsed: Math.round(mem.heapUsed / 1024 / 1024),
+            rss: Math.round(mem.rss / 1024 / 1024)
+        });
+    } catch (e) { }
+}, 60000);
+
 // ─── IPC Message Handler ──────────────────────────────────────────
 
 process.on('message', async (msg) => {
@@ -88,7 +101,7 @@ function burstEval(wsUrl, expression) {
     });
 }
 
-// ─── Multi-step Burst Inject ──────────────────────────────────────
+// ─── Multi-step Burst Inject (P0: single message listener) ───────
 
 function burstInject(wsUrl, targetId, script, isPaused) {
     return new Promise(async (resolve, reject) => {
@@ -100,22 +113,33 @@ function burstInject(wsUrl, targetId, script, isPaused) {
             return;
         }
 
+        // P0 Fix: Single message listener routed by ID.
+        // Previous version added a NEW listener per send() call, causing
+        // listener accumulation if inner timeouts fired before cleanup.
         let id = 0;
+        const pending = new Map(); // id → { resolve, reject, timer }
+
+        const messageHandler = (raw) => {
+            try {
+                const msg = JSON.parse(raw.toString());
+                if (msg.id && pending.has(msg.id)) {
+                    const handler = pending.get(msg.id);
+                    pending.delete(msg.id);
+                    clearTimeout(handler.timer);
+                    handler.resolve(msg);
+                }
+            } catch (e) { }
+        };
+        ws.on('message', messageHandler);
+
         const send = (method, params = {}) => {
             return new Promise((res, rej) => {
                 const myId = ++id;
-                const timer = setTimeout(() => rej(new Error(`timeout: ${method}`)), 5000);
-                const handler = (raw) => {
-                    try {
-                        const msg = JSON.parse(raw.toString());
-                        if (msg.id === myId) {
-                            clearTimeout(timer);
-                            ws.removeListener('message', handler);
-                            res(msg);
-                        }
-                    } catch (e) { }
-                };
-                ws.on('message', handler);
+                const timer = setTimeout(() => {
+                    pending.delete(myId);
+                    rej(new Error(`timeout: ${method}`));
+                }, 5000);
+                pending.set(myId, { resolve: res, reject: rej, timer });
                 ws.send(JSON.stringify({ id: myId, method, params }));
             });
         };
@@ -153,6 +177,11 @@ function burstInject(wsUrl, targetId, script, isPaused) {
         } catch (e) {
             reject(e);
         } finally {
+            // Clean up ALL pending handlers and the single listener
+            for (const [, handler] of pending) {
+                clearTimeout(handler.timer);
+            }
+            pending.clear();
             ws.removeAllListeners();
             try { ws.close(); } catch (e) { }
         }
