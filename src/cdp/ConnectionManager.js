@@ -288,17 +288,11 @@ class ConnectionManager {
                 return;
             }
 
-            // CDP Events
+            // CDP Events — minimal handler set (no Target.setDiscoverTargets).
+            // Target lifecycle events (targetCreated/targetDestroyed) are NOT
+            // subscribed to avoid interfering with AG's browser subagent.
+            // Target discovery is handled solely via heartbeat polling.
             switch (msg.method) {
-                case 'Target.targetCreated':
-                    this._handleNewTarget(msg.params.targetInfo);
-                    break;
-                case 'Target.targetDestroyed':
-                    this._handleTargetDestroyed(msg.params.targetId);
-                    break;
-                case 'Target.detachedFromTarget':
-                    this._handleSessionDetached(msg.params?.sessionId);
-                    break;
                 case 'Runtime.executionContextsCleared':
                     // Webview navigated internally — re-inject observer
                     if (msg.sessionId) this._reinjectForSession(msg.sessionId);
@@ -337,8 +331,12 @@ class ConnectionManager {
     // ─── Target Discovery & Session Management ────────────────────────
 
     async _initializeTargetDiscovery() {
-        // Enable real-time target discovery events
-        await this._send('Target.setDiscoverTargets', { discover: true });
+        // Browser subagent compatibility: NO Target.setDiscoverTargets.
+        // Subscribing to target lifecycle events broadcasts them to ALL CDP
+        // clients sharing this Electron process's debug port. This interferes
+        // with AG's internal browser subagent target management, causing
+        // "Cannot freeze array buffer views" crashes.
+        // Instead, we rely solely on heartbeat polling (Target.getTargets).
 
         // Scan existing targets
         const msg = await this._send('Target.getTargets');
@@ -357,16 +355,14 @@ class ConnectionManager {
         if (!url) return false;
         // Skip service workers and web workers — they have no DOM or window
         if (type === 'service_worker' || type === 'worker' || type === 'shared_worker') return false;
-        // Issue #36 fix: skip regular web pages (http/https) — these belong to the
-        // browser sub-agent (Playwright). Attaching to them causes "Cannot freeze
-        // array buffer views" errors because both our extension and the sub-agent
-        // issue competing CDP commands on the same targets.
-        // We only need VS Code webview targets (vscode-webview://) and iframes.
-        if (type === 'page' && (url.startsWith('http://') || url.startsWith('https://'))) return false;
-        return type === 'page' ||
-            url.includes('vscode-webview://') ||
-            url.includes('webview') ||
-            type === 'iframe';
+        // Issue #36 fix (v2): WHITELIST approach — only attach to VS Code webview targets.
+        // The old blacklist (skip http/https) leaked targets: browser sub-agent pages
+        // start as about:blank before navigating, slipping past the filter.
+        // Competing CDP attachments on the same target cause "Cannot freeze array
+        // buffer views with elements" crashes in the AG chat agent.
+        // Whitelist is airtight: only vscode-webview:// URLs belong to us.
+        if (!url.includes('vscode-webview')) return false;
+        return type === 'page' || type === 'iframe';
     }
 
     async _handleNewTarget(targetInfo) {
@@ -629,12 +625,14 @@ class ConnectionManager {
      */
     _scheduleHeartbeat() {
         clearTimeout(this.heartbeatTimer);
+        // 10s interval (down from 30s): compensates for removing
+        // Target.setDiscoverTargets real-time events.
         this.heartbeatTimer = setTimeout(async () => {
             await this._heartbeat();
             if (this.isRunning && this.ws) {
                 this._scheduleHeartbeat();
             }
-        }, 30000);
+        }, 10000);
     }
 
     /**
@@ -672,6 +670,20 @@ class ConnectionManager {
             const msg = await this._send('Target.getTargets');
             const targets = msg.result?.targetInfos || [];
             this.log(`[CDP] Heartbeat: ${targets.length} targets, ${this.sessions.size} sessions`);
+
+            // Browser subagent auto-pause: detect http/https page targets
+            // that indicate the AG browser subagent is active. When detected,
+            // yield the CDP port by disconnecting to prevent ArrayBuffer conflicts.
+            const browserSubagentActive = targets.some(t =>
+                t.type === 'page' && t.url &&
+                (t.url.startsWith('http://') || t.url.startsWith('https://'))
+            );
+            if (browserSubagentActive) {
+                this.log('[CDP] ⚠ Browser subagent detected — yielding CDP port');
+                this._closeWebSocket();
+                this._onClose(); // Triggers reconnect via _scheduleReconnect
+                return;
+            }
 
             // Discover any new targets that appeared since last check
             const candidates = targets.filter(t => this._isCandidate(t) && !this.sessions.has(t.targetId) && !this.ignoredTargets.has(t.targetId));

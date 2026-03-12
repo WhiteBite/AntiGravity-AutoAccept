@@ -1,5 +1,5 @@
 # AntiGravity AutoAccept
-<!-- v3.7.4 file edit auto-accept test -->
+<!-- v3.8.2 browser subagent compatibility -->
 
 [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-support-yellow?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/yazanbaker)
 
@@ -150,7 +150,7 @@ To run multiple agents with auto-accept on all of them:
 ## How it Works
 
 ### Persistent CDP + MutationObserver (v3.0.0+)
-The extension maintains a **persistent browser-level WebSocket** connection to Chromium's DevTools Protocol. Instead of polling every 1.5s, it injects a **MutationObserver** payload once per target. The observer reacts instantly when React mounts new button elements, with 100ms leading-edge throttle to prevent CPU spikes during streaming output.
+The extension maintains a **persistent browser-level WebSocket** connection to Chromium's DevTools Protocol. Instead of polling every 1.5s, it injects a **MutationObserver** payload once per target. The observer reacts instantly when React mounts new button elements, with 100ms leading-edge throttle to prevent CPU spikes during streaming output. The extension uses a **whitelist-only target filter** — it only attaches to `vscode-webview://` targets and automatically yields the CDP port when the AG browser sub-agent is detected, preventing ArrayBuffer conflicts.
 
 ### Single-Pass DOM Scanner (v3.1.0)
 The button scanner walks the DOM tree **exactly once** per cycle, checking all keywords simultaneously against each node. This is O(D) instead of the previous O(N×D) which could cause UI freezes with many keywords. Priority-aware matching ensures `Run` always beats `Accept`, which always beats `Allow`, regardless of DOM order.
@@ -159,7 +159,7 @@ The button scanner walks the DOM tree **exactly once** per cycle, checking all k
 Antigravity's agent panel runs in an isolated Chromium process (OOPIF). The injected script uses a deferred `isAgentPanel()` check inside `scanAndClick()` — verifying `.react-app-container` existence dynamically on each scan rather than at injection time. This avoids a race condition where the DOM is unhydrated on `targetCreated`.
 
 ### Heartbeat Self-Healing (v3.2.0)
-The CDP connection now validates existing sessions every heartbeat cycle (30s). If a session's MutationObserver is dead (execution context cleared by webview navigation or React hot-reload), it automatically re-injects the observer — no reconnection needed. Sessions unreachable 3 times consecutively are cleanly detached and pruned. *(Fixes the "stops clicking after ~1 hour" bug.)*
+The CDP connection validates existing sessions every heartbeat cycle (10s). If a session's MutationObserver is dead (execution context cleared by webview navigation or React hot-reload), it automatically re-injects the observer — no reconnection needed. Sessions unreachable 3 times consecutively are cleanly detached and pruned. The heartbeat also handles **target discovery** (replacing the removed `Target.setDiscoverTargets` subscription) and **browser sub-agent detection** — automatically disconnecting when `http://`/`https://` page targets appear to avoid CDP conflicts. *(Fixes the "stops clicking after ~1 hour" bug and the "Cannot freeze array buffer views" crash.)*
 
 ### Expand Button Loop Prevention (v3.5.1)
 Expand-type buttons (e.g. browser preview "Expand") use a **click-once-per-session** rule: once clicked, they are permanently suppressed for that CDP session via an `expandedOnce` Set. This prevents the infinite overlay re-open loop where closing the expanded panel triggers a re-click. The state resets naturally when a new agent conversation starts.

@@ -1,5 +1,18 @@
 # Changelog
 
+## [3.8.2] — 2026-03-12
+
+### Bug Fix — Issue #36 (Browser Sub-Agent Crash, Root Cause)
+- **Fixed** "Cannot freeze array buffer views with elements" crash when using the AG browser sub-agent. The v3.8.0 fix (target URL filter) only addressed the surface — the real conflict was at three deeper levels:
+  1. **Whitelist target filter**: Switched `_isCandidate` from a blacklist (skip `http://`/`https://`) to a whitelist (only attach to `vscode-webview://` URLs). The blacklist leaked `about:blank` targets created by the browser sub-agent before navigation.
+  2. **Removed `Target.setDiscoverTargets`**: Subscribing to target lifecycle events broadcast them to ALL CDP clients sharing the Electron debug port, interfering with AG's internal browser sub-agent target management. Now relies solely on heartbeat polling (`Target.getTargets`).
+  3. **Browser sub-agent auto-pause**: Heartbeat now detects `http://`/`https://` page targets and automatically yields the CDP port by disconnecting — prevents ArrayBuffer serialization conflicts between competing CDP sessions.
+
+### Performance
+- **Reduced** heartbeat interval from 30s to 10s to compensate for removing real-time target discovery events. New webview targets are now discovered within 10s instead of 30s.
+
+---
+
 ## [3.8.0] — 2026-03-11
 
 ### Bug Fixes — Idle Failure (Root Cause)
