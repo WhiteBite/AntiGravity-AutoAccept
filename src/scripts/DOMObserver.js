@@ -1,4 +1,4 @@
-// AntiGravity AutoAccept — DOM Observer Payload (v3.5.7)
+// AntiGravity AutoAccept — DOM Observer Payload (v3.5.8)
 // Generates a self-contained script injected ONCE per CDP session.
 // Uses MutationObserver for zero-polling, event-driven button clicking.
 // All cooldown state is localized to DOM data-attributes — no Node.js globals.
@@ -190,7 +190,11 @@ function buildDOMObserverScript(customTexts, blockedCommands, allowedCommands, a
                 var isExpandKeyword = (text === 'expand' || text === 'requires input');
                 var isMatch;
                 if (isExpandKeyword) {
-                    isMatch = nodeText === text;
+                    // 'expand' uses exact match to prevent Expand/Collapse toggle loops (v3.5.1 fix).
+                    // 'requires input' uses includes() because the rendered text is
+                    // "1 step requires input" / "N steps require input" — never an exact match.
+                    // No toggle-loop risk: clicking the bar expands the step and the bar disappears.
+                    isMatch = text === 'expand' ? nodeText === text : nodeText.includes(text);
                 } else {
                     isMatch = nodeText === text ||
                         (text.length >= 5 && nodeText.startsWith(text) && isWordBoundary(nodeText, text.length) && nodeText.length <= text.length * 3) ||
@@ -455,6 +459,9 @@ function buildDOMObserverScript(customTexts, blockedCommands, allowedCommands, a
                     clickCooldowns[key] = Date.now();
                 }
                 _log('clicking:', matchedText, '| node:', btn.tagName, '| text:', (btn.textContent || '').trim().substring(0, 40));
+                // Scroll off-screen buttons into view before clicking — fixes hidden Run button
+                // below the panel fold (e.g. behind collapsed "N Steps Requires Input" bar).
+                try { btn.scrollIntoView({ block: 'center', behavior: 'instant' }); } catch(e) {}
                 btn.click();
                 window.__AA_CLICK_COUNT = (window.__AA_CLICK_COUNT || 0) + 1;
                 return 'clicked:' + matchedText;

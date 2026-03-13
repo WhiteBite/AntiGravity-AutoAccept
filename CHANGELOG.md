@@ -1,4 +1,11 @@
 # Changelog
+## [3.9.13] — 2026-03-13
+
+### Bug Fix — Hidden Run Button Below Fold
+- **Fixed** Run button not being auto-clicked when pushed below the visible panel area by long agent conversations. The collapsed "N Step(s) Requires Input" bar was not matched because `'requires input'` used exact-match against the full text `"1 step requires input"`. Changed to `includes()` matching for `'requires input'` while keeping exact-match for `'expand'` to prevent the browser preview toggle loop (v3.5.1/v3.9.3 regression guard).
+- **Added** `scrollIntoView({ block: 'center', behavior: 'instant' })` before every `.click()` call, ensuring off-screen buttons are scrolled into the viewport before clicking.
+
+---
 
 ## [3.9.3] — 2026-03-12
 
