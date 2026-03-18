@@ -9,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const { ConnectionManager } = require('./cdp/ConnectionManager');
 const { DashboardProvider } = require('./dashboard/DashboardProvider');
+const { pingTelemetry } = require('./telemetry');
 
 // ─── Persistent Memory Logger (survives OOM crash) ────────────────
 let _memLogTimer = null;
@@ -91,6 +92,7 @@ let cachedAutoAcceptFileEdits = true;
 let cachedBlockedCommands = [];
 let cachedAllowedCommands = [];
 let cachedHasFilters = false;
+let cachedAutoRetryEnabled = true;
 
 function refreshConfig() {
     const config = vscode.workspace.getConfiguration('autoAcceptV2');
@@ -98,6 +100,7 @@ function refreshConfig() {
     const newBlocked = config.get('blockedCommands', []);
     const newAllowed = config.get('allowedCommands', []);
     const newHasFilters = newBlocked.length > 0 || newAllowed.length > 0;
+    const newRetry = config.get('autoRetryEnabled', true);
 
     // Log only on transitions
     if (newHasFilters !== cachedHasFilters) {
@@ -110,16 +113,20 @@ function refreshConfig() {
     cachedBlockedCommands = newBlocked;
     cachedAllowedCommands = newAllowed;
     cachedHasFilters = newHasFilters;
-    log(`[Config] hasFilters=${cachedHasFilters}, blocked=[${newBlocked.join(',')}], fileEdits=${newFileEdits}`);
+    cachedAutoRetryEnabled = newRetry;
+    log(`[Config] hasFilters=${cachedHasFilters}, blocked=[${newBlocked.join(',')}], fileEdits=${newFileEdits}, retry=${newRetry}`);
 
     // Hot-reload: push updated config to live CDP sessions
     if (connectionManager) {
         connectionManager.setCommandFilters(newBlocked, newAllowed);
         connectionManager.pushFilterUpdate(newBlocked, newAllowed);
 
-        // Re-inject observers when file edit setting changes (button list is baked at inject time)
-        if (connectionManager.autoAcceptFileEdits !== newFileEdits) {
-            connectionManager.autoAcceptFileEdits = newFileEdits;
+        // Re-inject observers when file edit or retry setting changes (keyword list is baked at inject time)
+        const needsReinject = connectionManager.autoAcceptFileEdits !== newFileEdits ||
+                              connectionManager.autoRetryEnabled !== newRetry;
+        connectionManager.autoAcceptFileEdits = newFileEdits;
+        connectionManager.autoRetryEnabled = newRetry;
+        if (needsReinject) {
             connectionManager.reinjectAll();
         }
     }
@@ -140,7 +147,13 @@ function getActiveCommands() {
     let commands = [...ALL_ACCEPT_COMMANDS];
 
     if (!cachedAutoAcceptFileEdits) {
-        commands = commands.filter(c => c !== 'antigravity.agent.acceptAgentStep');
+        // Fix #45: Remove BOTH the specific and generic acceptors.
+        // antigravity.command.accept is Antigravity's generic "accept whatever is pending"
+        // and will accept file edits through the backdoor if left in.
+        commands = commands.filter(c =>
+            c !== 'antigravity.agent.acceptAgentStep' &&
+            c !== 'antigravity.command.accept'
+        );
     }
 
     return commands;
@@ -196,6 +209,17 @@ function startPolling() {
             if (isEnabled) pollIntervalId = setTimeout(pollCycle, interval);
             return;
         }
+
+        // Fix #48 + #46: CDP Mutex — if Channel 2 is connected, stop the blind-polling sledgehammer.
+        // Channel 1 fires generic commands that steal focus, collapse context menus, and cause flickering.
+        // When CDP has active sessions, Channel 2's MutationObserver handles everything.
+        const isCdpActive = connectionManager && connectionManager.sessions.size > 0;
+        if (isCdpActive) {
+            // Keep the loop alive slowly to detect CDP disconnects, but do NOT fire commands
+            pollIntervalId = setTimeout(pollCycle, 2000);
+            return;
+        }
+
         pollRunning = true;
         try {
             // Re-read active commands each cycle so config changes take effect live.
@@ -388,6 +412,9 @@ function activate(context) {
     startMemoryLogger();
     log(`[MEM] Memory log: ${MEM_LOG_PATH}`);
 
+    // Telemetry: anonymous activation ping (fire-and-forget)
+    pingTelemetry('activate', log);
+
     // Initialize persistent CDP connection manager
     connectionManager = new ConnectionManager({
         log,
@@ -458,7 +485,8 @@ function activate(context) {
 
     // Cross-machine sync: persist analytics across VS Code environments
     context.globalState.setKeysForSync([
-        'autoAcceptTotalClicks', 'autoAcceptFirstClickDate', 'autoAcceptLastDismissedMilestone'
+        'autoAcceptTotalClicks', 'autoAcceptFirstClickDate', 'autoAcceptLastDismissedMilestone',
+        'autoAcceptLastToastDate', 'autoAcceptSponsorClicks'
     ]);
 
     // Initialize cached config state
@@ -502,6 +530,26 @@ function activate(context) {
         };
     });
 
+    // Wire diagnostic dump: pulls __AA_DIAG from active CDP sessions
+    dashboardProvider.getDiagnostics = async () => {
+        if (!connectionManager || connectionManager.sessions.size === 0) {
+            return { sessions: 0, message: 'No active CDP sessions' };
+        }
+        const results = {};
+        for (const [targetId, info] of connectionManager.sessions) {
+            try {
+                const check = await connectionManager._workerEval(info.wsUrl,
+                    '(() => { const d = window.__AA_DIAG || []; return { diagCount: d.length, diag: d.slice(-20), clickCount: window.__AA_CLICK_COUNT || 0, observerActive: !!window.__AA_OBSERVER_ACTIVE, paused: !!window.__AA_PAUSED, hasFilters: !!window.__AA_HAS_FILTERS, blocked: (window.__AA_BLOCKED || []).length, allowed: (window.__AA_ALLOWED || []).length }; })()'
+                );
+                const val = check.result?.result?.value;
+                results[targetId.substring(0, 6)] = val || { error: 'empty response' };
+            } catch (e) {
+                results[targetId.substring(0, 6)] = { error: e.message };
+            }
+        }
+        return { sessions: connectionManager.sessions.size, data: results };
+    };
+
     context.subscriptions.push(
         vscode.commands.registerCommand('autoAcceptV2.dashboard', () => {
             dashboardProvider.show();
@@ -536,6 +584,23 @@ function activate(context) {
         })
     );
 
+    // SSH Remote detection: CDP is architecturally impossible in remote mode.
+    // The extension runs on the headless remote server (Node.js), but the UI
+    // renders on the local Electron client. Channel 1 (VS Code commands) works
+    // natively over RPC, so we fall back to polling-only mode.
+    if (vscode.env.remoteName) {
+        log(`[Setup] Remote environment (${vscode.env.remoteName}) detected. CDP disabled.`);
+        log('[Setup] Operating in Channel 1 (command polling) mode only.');
+        if (context.globalState.get('autoAcceptV2Enabled', false)) {
+            isEnabled = true;
+            startPolling();
+        }
+        updateStatusBar();
+        log('Extension activated');
+        showWeeklyToast(context);
+        return;
+    }
+
     // Check CDP on activation — prompt auto-fix if port is closed
     checkAndFixCDP().then(cdpOk => {
         if (cdpOk) {
@@ -549,7 +614,42 @@ function activate(context) {
         }
         updateStatusBar();
         log('Extension activated');
+
+        // Weekly stats toast — drives dashboard opens (sponsor impressions)
+        showWeeklyToast(context);
     });
+}
+
+/**
+ * Show a weekly stats notification to drive dashboard traffic.
+ * Fires at most once per 7 days. Clicking "View Full Stats" opens the dashboard.
+ */
+function showWeeklyToast(context) {
+    const WEEK_MS = 604800000;
+    const lastToast = context.globalState.get('autoAcceptLastToastDate', 0);
+    const now = Date.now();
+
+    if (now - lastToast < WEEK_MS) return; // Already shown this week
+
+    const totalClicks = context.globalState.get('autoAcceptTotalClicks', 0);
+    if (totalClicks < 10) return; // Skip for brand-new users with no meaningful data
+
+    const minsSaved = Math.round((totalClicks * SECONDS_SAVED_PER_CLICK) / 60);
+    const timeStr = minsSaved >= 60
+        ? `${Math.floor(minsSaved / 60)}h ${minsSaved % 60}m`
+        : `${minsSaved} mins`;
+
+    vscode.window.showInformationMessage(
+        `⚡ AutoAccept has saved you ${timeStr} of manual clicking so far!`,
+        'View Full Stats'
+    ).then(action => {
+        if (action === 'View Full Stats') {
+            vscode.commands.executeCommand('autoAcceptV2.dashboard');
+        }
+    });
+
+    context.globalState.update('autoAcceptLastToastDate', now);
+    log(`[Toast] Weekly stats notification shown (${timeStr} saved)`);
 }
 
 function deactivate() {

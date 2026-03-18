@@ -1,4 +1,4 @@
-// AntiGravity AutoAccept — DOM Observer Payload (v3.5.8)
+// AntiGravity AutoAccept — DOM Observer Payload (v3.5.7)
 // Generates a self-contained script injected ONCE per CDP session.
 // Uses MutationObserver for zero-polling, event-driven button clicking.
 // All cooldown state is localized to DOM data-attributes — no Node.js globals.
@@ -11,16 +11,17 @@
  * @param {boolean} [autoAcceptFileEdits=true] - Whether to auto-accept file edit buttons
  * @returns {string} JavaScript source to evaluate via CDP Runtime.evaluate
  */
-function buildDOMObserverScript(customTexts, blockedCommands, allowedCommands, autoAcceptFileEdits) {
+function buildDOMObserverScript(customTexts, blockedCommands, allowedCommands, autoAcceptFileEdits, autoRetryEnabled) {
     blockedCommands = blockedCommands || [];
     allowedCommands = allowedCommands || [];
     if (autoAcceptFileEdits === undefined) autoAcceptFileEdits = true;
+    if (autoRetryEnabled === undefined) autoRetryEnabled = true;
 
     const allTexts = [
         'run',  // Primary action button
         ...(autoAcceptFileEdits ? ['accept'] : []),  // Only include 'accept' when file edits are enabled
         'always allow', 'allow this conversation', 'allow',
-        'retry', 'continue',
+        ...(autoRetryEnabled ? ['retry', 'continue'] : []),  // PR #41: zero-overhead toggle
         ...customTexts
     ];
     const expandTexts = ['requires input'];
@@ -190,11 +191,7 @@ function buildDOMObserverScript(customTexts, blockedCommands, allowedCommands, a
                 var isExpandKeyword = (text === 'expand' || text === 'requires input');
                 var isMatch;
                 if (isExpandKeyword) {
-                    // 'expand' uses exact match to prevent Expand/Collapse toggle loops (v3.5.1 fix).
-                    // 'requires input' uses includes() because the rendered text is
-                    // "1 step requires input" / "N steps require input" — never an exact match.
-                    // No toggle-loop risk: clicking the bar expands the step and the bar disappears.
-                    isMatch = text === 'expand' ? nodeText === text : nodeText.includes(text);
+                    isMatch = nodeText === text;
                 } else {
                     isMatch = nodeText === text ||
                         (text.length >= 5 && nodeText.startsWith(text) && isWordBoundary(nodeText, text.length) && nodeText.length <= text.length * 3) ||
@@ -364,6 +361,31 @@ function buildDOMObserverScript(customTexts, blockedCommands, allowedCommands, a
 
             if (!isAgentPanel()) return null;
 
+            // ═══ PASSIVE DIAGNOSTIC: expand/requires-input element scan ═══
+            // Read-only: does NOT modify matching or clicking behavior.
+            // Throttled to once per 10s to avoid perf impact.
+            if (!window.__AA_EXPAND_DIAG_TS || Date.now() - window.__AA_EXPAND_DIAG_TS > 10000) {
+                window.__AA_EXPAND_DIAG_TS = Date.now();
+                var dW = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+                var dN;
+                while ((dN = dW.nextNode())) {
+                    var dT = (dN.textContent || '').trim().toLowerCase();
+                    if (dT.length > 80 || dT.length < 3) continue;
+                    if (dT.includes('requires input') || dT === 'expand') {
+                        if (!window.__AA_DIAG) window.__AA_DIAG = [];
+                        if (window.__AA_DIAG.length < 50) window.__AA_DIAG.push({
+                            action: 'EXPAND_SCAN',
+                            tag: (dN.tagName || '').toLowerCase(),
+                            text: dT.substring(0, 50),
+                            cls: (dN.className + '').substring(0, 40),
+                            role: dN.getAttribute('role') || '',
+                            pTag: dN.parentElement ? dN.parentElement.tagName.toLowerCase() : '-',
+                            pText: dN.parentElement ? (dN.parentElement.textContent || '').trim().substring(0, 60).toLowerCase() : '-'
+                        });
+                    }
+                }
+            }
+
             // Single-pass: combine all keywords and walk the DOM exactly once
             var allTexts = BUTTON_TEXTS.concat(EXPAND_TEXTS);
 
@@ -459,9 +481,6 @@ function buildDOMObserverScript(customTexts, blockedCommands, allowedCommands, a
                     clickCooldowns[key] = Date.now();
                 }
                 _log('clicking:', matchedText, '| node:', btn.tagName, '| text:', (btn.textContent || '').trim().substring(0, 40));
-                // Scroll off-screen buttons into view before clicking — fixes hidden Run button
-                // below the panel fold (e.g. behind collapsed "N Steps Requires Input" bar).
-                try { btn.scrollIntoView({ block: 'center', behavior: 'instant' }); } catch(e) {}
                 btn.click();
                 window.__AA_CLICK_COUNT = (window.__AA_CLICK_COUNT || 0) + 1;
                 return 'clicked:' + matchedText;

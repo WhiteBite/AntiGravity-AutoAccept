@@ -15,3 +15,4 @@ temp_vsix
 vsix_check
 temp_extract
 *.zip
+worker/

@@ -1,5 +1,5 @@
 # AntiGravity AutoAccept
-<!-- v3.9.13 hidden run button fix -->
+<!-- v3.8.2 browser subagent compatibility -->
 
 [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-support-yellow?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/yazanbaker)
 
@@ -163,9 +163,6 @@ The CDP connection validates existing sessions every heartbeat cycle (10s). If a
 
 ### Expand Button Loop Prevention (v3.5.1)
 Expand-type buttons (e.g. browser preview "Expand") use a **click-once-per-session** rule: once clicked, they are permanently suppressed for that CDP session via an `expandedOnce` Set. This prevents the infinite overlay re-open loop where closing the expanded panel triggers a re-click. The state resets naturally when a new agent conversation starts.
-
-### Hidden Run Button Recovery (v3.9.13)
-When the agent panel has a long conversation, Run buttons can be pushed below the visible fold behind a collapsed "N Step(s) Requires Input" bar. The extension uses `includes('requires input')` partial matching to detect these bars (exact text varies: "1 step requires input", "2 steps require input", etc.) and auto-clicks them to reveal the hidden step. Additionally, all button clicks are preceded by `scrollIntoView()` to ensure off-screen buttons are scrolled into the viewport before clicking.
 
 ### Button Detection
 Inside the agent panel, a `TreeWalker` searches for buttons by text content using `startsWith` matching with **word-boundary checks** to prevent false positives (e.g. `accept-test.js` won't match `accept`):

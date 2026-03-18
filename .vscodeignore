@@ -11,3 +11,4 @@ test_cdp*
 COMMAND_AUDIT.md
 ANALYSIS.md
 CHANGELOG.md
+worker/

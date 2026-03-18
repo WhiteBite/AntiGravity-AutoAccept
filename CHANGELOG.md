@@ -1,9 +1,42 @@
 # Changelog
-## [3.9.13] — 2026-03-13
 
-### Bug Fix — Hidden Run Button Below Fold
-- **Fixed** Run button not being auto-clicked when pushed below the visible panel area by long agent conversations. The collapsed "N Step(s) Requires Input" bar was not matched because `'requires input'` used exact-match against the full text `"1 step requires input"`. Changed to `includes()` matching for `'requires input'` while keeping exact-match for `'expand'` to prevent the browser preview toggle loop (v3.5.1/v3.9.3 regression guard).
-- **Added** `scrollIntoView({ block: 'center', behavior: 'instant' })` before every `.click()` call, ensuring off-screen buttons are scrolled into the viewport before clicking.
+## [3.11.0] — 2026-03-18
+
+### Bug Fix — Issue #48 (Context Menu "Disabled by Filter")
+- **Fixed** right-click context menus showing "disabled by filter" and collapsing instantly. Root cause: Channel 1's blind command polling was stealing window focus. Added **CDP Mutex** — Channel 1 stops firing commands when Channel 2 (CDP) has active sessions.
+
+### Bug Fix — Issue #45 (Accept Edits Toggle Ignored)
+- **Fixed** file edits auto-accepted even when `autoAcceptFileEdits` was false. Root cause: `antigravity.command.accept` (generic acceptor) was still firing via Channel 1. Now both specific and generic accept commands are removed when the setting is false.
+
+### Bug Fix — Issue #46 (Agent Window Flickering)
+- **Fixed** as side-effect of CDP Mutex. The 500ms command polling caused constant `when` clause re-evaluation and React DOM reflows.
+
+### SSH Remote Support — Issue #44
+- **Added** SSH Remote detection via `vscode.env.remoteName`. CDP initialization skipped in remote environments. Falls back to Channel 1 only.
+
+### Auto-Retry Toggle — PR #41 Concept
+- **Added** `autoAcceptV2.autoRetryEnabled` setting (default: `true`). When disabled, `retry` and `continue` keywords are omitted from the MutationObserver — zero-overhead toggle via keyword omission.
+
+---
+
+## [3.10.0] — 2026-03-18
+
+### Monetization Infrastructure
+- **Added** anonymous telemetry module (`src/telemetry.js`) — fire-and-forget pings gated behind `vscode.env.isTelemetryEnabled`. Sends only event name + extension version; no PII, no user IDs.
+- **Added** `activate` telemetry ping on extension activation (MAU signal).
+- **Added** `dashboard_open` telemetry ping when the dashboard webview is created (sponsor impression signal).
+- **Added** Cloudflare Worker (`worker/aa-telemetry/`) with KV-based counters: `/ping` endpoint for incrementing counters, `/stats` endpoint for viewing totals + daily breakdown.
+
+### Weekly Stats Toast
+- **Added** weekly information notification: "⚡ AutoAccept has saved you {time} of manual clicking so far!" with a "View Full Stats" button that opens the dashboard. Fires at most once per 7 days, skips users with fewer than 10 total clicks.
+
+### Dashboard
+- **Upgraded** sponsor slot with "🤝 Keeping AutoAccept Free & Maintained" framing — explains why the sponsor space exists and positions sponsors as heroes keeping the tool free.
+- **Updated** CTA to "Reach 24,000+ AI developers who automate their workflows."
+- **Changed** sponsor slot border from dashed to solid, added link-colored CTA using `var(--vscode-textLink-foreground)`.
+
+### Sync
+- **Added** `autoAcceptLastToastDate` and `autoAcceptSponsorClicks` to cross-machine sync keys.
 
 ---
 

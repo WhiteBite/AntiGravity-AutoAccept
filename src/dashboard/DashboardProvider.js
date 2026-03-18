@@ -3,6 +3,7 @@
 
 const vscode = require('vscode');
 const path = require('path');
+const { pingTelemetry } = require('../telemetry');
 
 class DashboardProvider {
     static get viewType() { return 'autoAcceptV2.dashboard'; }
@@ -18,6 +19,7 @@ class DashboardProvider {
         this._getStatus = getStatus;
         this._panel = null;
         this._disposables = [];
+        this.getDiagnostics = null; // set by extension.js to fetch __AA_DIAG from CDP
     }
 
     /**
@@ -61,6 +63,9 @@ class DashboardProvider {
             this._disposables = [];
         }, null, this._disposables);
 
+        // Telemetry: dashboard open ping (fire-and-forget)
+        pingTelemetry('dashboard_open', this._log);
+
         // State is pushed when webview sends 'ready' — no setTimeout race condition
     }
 
@@ -78,6 +83,7 @@ class DashboardProvider {
                 cdpConnected: status.cdpConnected,
                 sessionCount: status.sessionCount,
                 autoAcceptFileEdits: config.get('autoAcceptFileEdits', true),
+                autoRetryEnabled: config.get('autoRetryEnabled', true),
                 blockedCommands: config.get('blockedCommands', []),
                 allowedCommands: config.get('allowedCommands', []),
                 pollInterval: config.get('pollInterval', 500),
@@ -188,6 +194,42 @@ class DashboardProvider {
                 clicks.push(now);
                 this._context.globalState.update('autoAcceptSponsorClicks', clicks);
                 vscode.env.openExternal(vscode.Uri.parse('https://github.com/yazanbaker94/AntiGravity-AutoAccept'));
+                break;
+            }
+            case 'getDiagDump': {
+                const status = this._getStatus();
+                const ext = vscode.extensions.getExtension('YazanBaker.antigravity-autoaccept');
+                const diagData = {
+                    timestamp: new Date().toISOString(),
+                    version: ext ? ext.packageJSON.version : 'unknown',
+                    remoteName: vscode.env.remoteName || null,
+                    appHost: vscode.env.appHost,
+                    appName: vscode.env.appName,
+                    isEnabled: status.isEnabled,
+                    cdpConnected: status.cdpConnected,
+                    sessionCount: status.sessionCount,
+                    telemetryEnabled: vscode.env.isTelemetryEnabled,
+                    config: {
+                        autoAcceptFileEdits: config.get('autoAcceptFileEdits', true),
+                        autoRetryEnabled: config.get('autoRetryEnabled', true),
+                        blockedCommands: config.get('blockedCommands', []),
+                        allowedCommands: config.get('allowedCommands', []),
+                        pollInterval: config.get('pollInterval', 500),
+                        cdpPort: config.get('cdpPort', 9333),
+                        customButtonTexts: config.get('customButtonTexts', [])
+                    },
+                    cdpDiag: null
+                };
+                // Fetch __AA_DIAG from active CDP sessions if available
+                if (this.getDiagnostics) {
+                    try {
+                        const cdpDiag = await this.getDiagnostics();
+                        diagData.cdpDiag = cdpDiag;
+                    } catch (e) {
+                        diagData.cdpDiag = { error: e.message };
+                    }
+                }
+                this._panel.webview.postMessage({ type: 'diagDump', data: JSON.stringify(diagData, null, 2) });
                 break;
             }
         }
@@ -339,6 +381,14 @@ class DashboardProvider {
 <body>
     <h1><span class="icon">⚡</span> AutoAccept Dashboard</h1>
 
+    <!-- Sponsor Banner (Top placement — maximum visibility) -->
+    <div id="sponsor-slot" tabindex="0" role="button" aria-label="Sponsor this project" style="background:var(--vscode-textBlockQuote-background, rgba(255,255,255,0.04));border:1px solid var(--border);border-radius:8px;padding:16px 18px;margin-bottom:16px;text-align:center;font-size:12px;line-height:1.7">
+        <div style="font-size:13px;font-weight:600;margin-bottom:6px;opacity:0.9">🤝 Keeping AutoAccept Free & Maintained</div>
+        <div style="font-size:11px;opacity:0.6;margin-bottom:8px">I spend 10+ hrs/week updating this tool to match IDE DOM changes. To keep it 100% free forever instead of adding a paywall, this space is reserved for a sponsor.</div>
+        <span style="opacity:0.7" id="sponsor-text">Reach 24,000+ AI developers who automate their workflows.</span><br>
+        <span style="color:var(--vscode-textLink-foreground, var(--accent));font-weight:600">Sponsor this space &#8599;</span>
+    </div>
+
     <div class="status-bar">
         <span class="status-badge" id="status-enabled">
             <span class="status-dot" id="dot-enabled"></span>
@@ -392,11 +442,6 @@ class DashboardProvider {
         </div>
     </div>
 
-    <!-- Sponsor Banner (Premium placement under stats — full card clickable) -->
-    <div id="sponsor-slot" tabindex="0" role="button" aria-label="Sponsor this project" style="background:var(--vscode-textBlockQuote-background, rgba(255,255,255,0.04));border:1px dashed var(--border);border-radius:8px;padding:14px 16px;margin-bottom:16px;text-align:center;font-size:12px;line-height:1.6">
-        <span style="opacity:0.7" id="sponsor-text">Want your brand here? Seen by developers saving time every week.</span><br>
-        <span style="color:var(--accent);font-weight:600">Sponsor this project &#8599;</span>
-    </div>
 
     <!-- Settings & Command Configuration -->
     <div class="card">
@@ -408,6 +453,16 @@ class DashboardProvider {
             </div>
             <label class="switch">
                 <input type="checkbox" id="chk-file-edits" onchange="updateConfig('autoAcceptFileEdits', this.checked)">
+                <span class="slider"></span>
+            </label>
+        </div>
+        <div class="toggle-row">
+            <div>
+                <div class="toggle-label">Auto-Retry on Errors</div>
+                <div class="toggle-desc">Auto-click Retry & Continue when agent hits errors</div>
+            </div>
+            <label class="switch">
+                <input type="checkbox" id="chk-auto-retry" onchange="updateConfig('autoRetryEnabled', this.checked)">
                 <span class="slider"></span>
             </label>
         </div>
@@ -445,11 +500,27 @@ class DashboardProvider {
         </div>
     </div>
 
+    <!-- Diagnostic Dump -->
+    <div class="card">
+        <div class="card-title">&#128203; Diagnostics</div>
+        <div class="toggle-desc" style="margin-bottom:8px">Copy debug info to clipboard for bug reports</div>
+        <button id="btn-diag-dump" class="btn" style="width:100%;padding:8px;cursor:pointer;font-size:13px" onclick="copyDiagDump()">&#128203; Copy Diagnostic Dump</button>
+        <div id="diag-status" style="margin-top:6px;font-size:11px;color:var(--vscode-descriptionForeground);display:none"></div>
+    </div>
+
 <script>
     const vscode = acquireVsCodeApi();
     let state = {};
+    let _pendingDiag = false;
 
     function toggle() { vscode.postMessage({ type: 'toggle' }); }
+
+    function copyDiagDump() {
+        if (_pendingDiag) return;
+        _pendingDiag = true;
+        document.getElementById('btn-diag-dump').textContent = '⏳ Collecting...';
+        vscode.postMessage({ type: 'getDiagDump' });
+    }
 
     function updateConfig(key, value) {
         vscode.postMessage({ type: 'updateConfig', key, value });
@@ -524,6 +595,7 @@ class DashboardProvider {
 
         // Settings
         document.getElementById('chk-file-edits').checked = data.autoAcceptFileEdits;
+        document.getElementById('chk-auto-retry').checked = data.autoRetryEnabled;
 
         // Lists
         renderList('list-blocked', data.blockedCommands, 'removeBlocked');
@@ -663,6 +735,22 @@ class DashboardProvider {
         const msg = e.data;
         if (msg.type === 'state') { updateUI(msg.data); updateAnalytics(msg.data); }
         else if (msg.type === 'activity') addActivity(msg.data);
+        else if (msg.type === 'diagDump') {
+            _pendingDiag = false;
+            var btn = document.getElementById('btn-diag-dump');
+            var statusEl = document.getElementById('diag-status');
+            navigator.clipboard.writeText(msg.data).then(function() {
+                btn.textContent = '\u2705 Copied to clipboard!';
+                statusEl.style.display = 'block';
+                statusEl.textContent = 'Paste this into your GitHub issue for faster debugging.';
+                setTimeout(function() { btn.textContent = '\uD83D\uDCCB Copy Diagnostic Dump'; }, 3000);
+            }).catch(function() {
+                btn.textContent = '\u274C Copy failed';
+                statusEl.style.display = 'block';
+                statusEl.innerHTML = '<pre style="max-height:200px;overflow:auto;font-size:10px;padding:6px;background:var(--vscode-textCodeBlock-background);border-radius:4px">' + escHtml(msg.data) + '</pre>';
+                setTimeout(function() { btn.textContent = '\uD83D\uDCCB Copy Diagnostic Dump'; }, 5000);
+            });
+        }
     });
 </script>
 </body>
