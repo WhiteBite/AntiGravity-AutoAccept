@@ -413,7 +413,7 @@ function activate(context) {
     log(`[MEM] Memory log: ${MEM_LOG_PATH}`);
 
     // Telemetry: anonymous activation ping (fire-and-forget)
-    pingTelemetry('activate', log);
+    pingTelemetry('activate', context, log);
 
     // Initialize persistent CDP connection manager
     connectionManager = new ConnectionManager({

@@ -64,7 +64,7 @@ class DashboardProvider {
         }, null, this._disposables);
 
         // Telemetry: dashboard open ping (fire-and-forget)
-        pingTelemetry('dashboard_open', this._log);
+        pingTelemetry('dashboard_open', this._context, this._log);
 
         // State is pushed when webview sends 'ready' — no setTimeout race condition
     }
