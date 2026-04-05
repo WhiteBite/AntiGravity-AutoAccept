@@ -301,6 +301,26 @@ function pingPort(port) {
     });
 }
 
+function autoDiscoverPort() {
+    try {
+        let cmd = '';
+        if (process.platform === 'win32') {
+            cmd = 'wmic process where "name like \'%Antigravity%\'" get commandline';
+        } else {
+            cmd = 'ps -eo command | grep [A]ntigravity';
+        }
+        const stdout = cp.execSync(cmd, { encoding: 'utf8', windowsHide: true });
+        const matches = stdout.matchAll(/--remote-debugging-port[=\s]+(\d+)/g);
+        for (const match of matches) {
+            const port = parseInt(match[1], 10);
+            if (port > 0 && port < 65536) {
+                return port;
+            }
+        }
+    } catch (e) {}
+    return null;
+}
+
 async function checkAndFixCDP() {
     const configPort = getConfiguredPort();
 
@@ -309,14 +329,24 @@ async function checkAndFixCDP() {
         return true;
     }
 
+    // Attempt auto-discovery before giving up
+    const discoveredPort = autoDiscoverPort();
+    if (discoveredPort) {
+        if (await pingPort(discoveredPort)) {
+            log(`[CDP] Auto-discovered running port: ${discoveredPort}. Updating settings...`);
+            await vscode.workspace.getConfiguration('autoAcceptV2').update('cdpPort', discoveredPort, true);
+            return true;
+        }
+    }
+
     // Port refused — prompt user
     log(`[CDP] ⚠ Port ${configPort} refused — remote debugging not enabled`);
     vscode.window.showErrorMessage(
         `⚡ AutoAccept needs Debug Mode (Port ${configPort}). Please apply the fix or update your shortcut.`,
-        'Auto-Fix & Restart',
+        'Auto-Fix Shortcuts',
         'Manual Guide'
     ).then(async action => {
-        if (action === 'Auto-Fix & Restart') {
+        if (action === 'Auto-Fix Shortcuts') {
             const net = require('net');
             let targetPort = configPort;
             const isPortFree = await new Promise(res => {
@@ -337,7 +367,7 @@ async function checkAndFixCDP() {
                     log(`[CDP] Port ${configPort} was busy. Selected new free port: ${targetPort}`);
                 }
             }
-            applyPermanentWindowsPatch(targetPort);
+            applyPermanentWindowsPatch(targetPort, process.execPath);
         } else if (action === 'Manual Guide') {
             vscode.env.openExternal(vscode.Uri.parse('https://github.com/yazanbaker94/AntiGravity-AutoAccept#setup'));
         }
@@ -345,36 +375,38 @@ async function checkAndFixCDP() {
     return false;
 }
 
-function applyPermanentWindowsPatch(targetPort) {
+function applyPermanentWindowsPatch(targetPort, targetExe) {
     if (process.platform !== 'win32') {
         vscode.window.showInformationMessage('Auto-patching is Windows-only. Use the Manual Guide.');
         return;
     }
 
+    const appDir = require('path').dirname(targetExe);
+
     // Fileless patcher: NO temp file needed. Encoded in memory.
     const psContent = `
 $flag = "--remote-debugging-port=${targetPort}"
 $WshShell = New-Object -comObject WScript.Shell
-$paths = @("$env:USERPROFILE\\\\Desktop", "$env:PUBLIC\\\\Desktop", "$env:APPDATA\\\\Microsoft\\\\Windows\\\\Start Menu\\\\Programs", "$env:ALLUSERSPROFILE\\\\Microsoft\\\\Windows\\\\Start Menu\\\\Programs", "$env:APPDATA\\\\Microsoft\\\\Internet Explorer\\\\Quick Launch\\\\User Pinned\\\\TaskBar")
+$paths = @("$env:USERPROFILE\\\\Desktop", "$env:PUBLIC\\\\Desktop", "$env:APPDATA\\\\Microsoft\\\\Windows\\\\Start Menu\\\\Programs", "$env:ALLUSERSPROFILE\\\\Microsoft\\\\Windows\\\\Start Menu\\\\Programs", "$env:APPDATA\\\\Microsoft\\\\Internet Explorer\\\\Quick Launch\\\\User Pinned\\\\TaskBar", "${appDir}")
 $patched = $false
 $patchedLnk = $null
 
 # 1. Patch Shortcuts
 foreach ($dir in $paths) {
     if (Test-Path $dir) {
-        $files = Get-ChildItem -Path $dir -Filter "*.lnk" -Recurse -ErrorAction SilentlyContinue
+        $files = Get-ChildItem -Path $dir -Filter "*.lnk" -Recurse -Depth 2 -ErrorAction SilentlyContinue
         foreach ($file in $files) {
             try {
                 $shortcut = $WshShell.CreateShortcut($file.FullName)
-                if ($file.Name -match "Antigravity" -or $shortcut.TargetPath -match "Antigravity") {
+                # Ensure we only patch shortcuts that actually point to our Antigravity executable or have the name
+                if ($file.Name -match "Antigravity" -or $shortcut.TargetPath -match "Antigravity" -or $shortcut.TargetPath -eq "${targetExe}") {
                     $args = $shortcut.Arguments
-                    if ($args -match "--remote-debugging-port=\\\\d+") {
-                        $shortcut.Arguments = $args -replace "--remote-debugging-port=\\\\d+", $flag
-                    } elseif ($args -match "--remote-debugging-port=") {
-                        $shortcut.Arguments = $args -replace "--remote-debugging-port=", "--remote-debugging-port=${targetPort}"
-                    } else {
-                        $shortcut.Arguments = ("$args " + $flag).Trim()
-                    }
+                    
+                    # Aggressively remove all existing configurations of the flag to avoid corrupted concatenation
+                    $args = $args -replace "--remote-debugging-port[=\\s]+[\\d]+", ""
+                    $args = $args -replace "--remote-debugging-port(?=[\\s]|$)", ""
+                    
+                    $shortcut.Arguments = ($args + " " + $flag).Trim()
                     $shortcut.Save()
                     $patched = $true
                     if (-not $patchedLnk) { $patchedLnk = $file.FullName }
@@ -387,40 +419,19 @@ foreach ($dir in $paths) {
 }
 
 # 2. Patch Registry Autorun
-$regPath = "HKCU:\\\\Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Run"
+$regPath = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"
 try {
     $val = Get-ItemProperty -Path $regPath -Name "Antigravity" -ErrorAction SilentlyContinue
     if ($val) {
         $cmd = $val.Antigravity
-        if ($cmd -match "--remote-debugging-port=\\\\d+") {
-            $cmd = $cmd -replace "--remote-debugging-port=\\\\d+", $flag
-        } elseif ($cmd -match "--remote-debugging-port=") {
-            $cmd = $cmd -replace "--remote-debugging-port=", "--remote-debugging-port=${targetPort}"
-        } else {
-            $cmd = ("$cmd " + $flag).Trim()
-        }
+        $cmd = $cmd -replace "--remote-debugging-port[=\\s]+[\\d]+", ""
+        $cmd = $cmd -replace "--remote-debugging-port(?=[\\s]|$)", ""
+        $cmd = ($cmd + " " + $flag).Trim()
         Set-ItemProperty -Path $regPath -Name "Antigravity" -Value $cmd -Force
     }
 } catch { }
 
-# 3. Kill Zombies & Restart
-$exePath = $null
-$proc = Get-Process -Name "Antigravity" -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($proc -and $proc.Path) { $exePath = $proc.Path }
-
-$allProcs = Get-Process -Name "Antigravity" -ErrorAction SilentlyContinue
-if ($allProcs) {
-    $allProcs | Stop-Process -Force
-    Start-Sleep -Seconds 2
-}
-
-if ($exePath) {
-    Start-Process -FilePath $exePath -ArgumentList $flag
-} elseif ($patchedLnk) {
-    Invoke-Item $patchedLnk
-}
-
-if ($patched -or $patchedLnk) { Write-Output "SUCCESS|$patchedLnk" }
+if ($patched -or $patchedLnk) { Write-Output "SUCCESS" }
 else { Write-Output "NOT_FOUND" }
 `;
 
@@ -439,11 +450,10 @@ else { Write-Output "NOT_FOUND" }
             }
             const out = stdout.trim();
             log(`[CDP] Patcher output: ${out}`);
-            if (out.includes('SUCCESS|')) {
-                const lnkPath = out.split('SUCCESS|')[1].trim();
-                log(`[CDP] ✓ Auto-Fix complete, restarted with ${lnkPath}`);
+            if (out.includes('SUCCESS')) {
+                log(`[CDP] ✓ Auto-Fix complete. Please restart Antigravity manually.`);
                 vscode.window.showInformationMessage(
-                    `✅ AutoAccept Fix applied! Antigravity was restarted with valid Debug Port (${targetPort}).`
+                    `✅ AutoAccept Fix applied! Please CLOSE Antigravity manually and launch it again to apply the Debug Port (${targetPort}).`
                 );
             } else {
                 log('[CDP] No matching shortcuts found');
