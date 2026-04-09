@@ -305,7 +305,7 @@ function autoDiscoverPort() {
     try {
         let cmd = '';
         if (process.platform === 'win32') {
-            cmd = 'wmic process where "name like \'%Antigravity%\'" get commandline';
+            cmd = 'powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match \'--remote-debugging-port\' } | Select-Object -ExpandProperty CommandLine"';
         } else {
             cmd = 'ps -eo command | grep [A]ntigravity';
         }
@@ -402,11 +402,14 @@ foreach ($dir in $paths) {
                 if ($file.Name -match "Antigravity" -or $shortcut.TargetPath -match "Antigravity" -or $shortcut.TargetPath -eq "${targetExe}") {
                     $args = $shortcut.Arguments
                     
-                    # Aggressively remove all existing configurations of the flag to avoid corrupted concatenation
-                    $args = $args -replace "--remote-debugging-port[=\\s]+[\\d]+", ""
-                    $args = $args -replace "--remote-debugging-port(?=[\\s]|$)", ""
-                    
-                    $shortcut.Arguments = ($args + " " + $flag).Trim()
+                    if ($args -match '--remote-debugging-port=\d+') {
+                        $args = $args -replace '--remote-debugging-port=\d+', $flag
+                    } elseif ($args -match '--remote-debugging-port(?!\d)') {
+                        $args = $args -replace '--remote-debugging-port(?!\d)', $flag
+                    } else {
+                        $args = ($args + " " + $flag).Trim()
+                    }
+                    $shortcut.Arguments = $args
                     $shortcut.Save()
                     $patched = $true
                     if (-not $patchedLnk) { $patchedLnk = $file.FullName }
@@ -424,9 +427,13 @@ try {
     $val = Get-ItemProperty -Path $regPath -Name "Antigravity" -ErrorAction SilentlyContinue
     if ($val) {
         $cmd = $val.Antigravity
-        $cmd = $cmd -replace "--remote-debugging-port[=\\s]+[\\d]+", ""
-        $cmd = $cmd -replace "--remote-debugging-port(?=[\\s]|$)", ""
-        $cmd = ($cmd + " " + $flag).Trim()
+        if ($cmd -match '--remote-debugging-port=\d+') {
+            $cmd = $cmd -replace '--remote-debugging-port=\d+', $flag
+        } elseif ($cmd -match '--remote-debugging-port(?!\d)') {
+            $cmd = $cmd -replace '--remote-debugging-port(?!\d)', $flag
+        } else {
+            $cmd = ($cmd + " " + $flag).Trim()
+        }
         Set-ItemProperty -Path $regPath -Name "Antigravity" -Value $cmd -Force
     }
 } catch { }
