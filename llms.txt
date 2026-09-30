@@ -1,0 +1,27 @@
+<!-- rdk:generated:start -->
+# antigravity-autoaccept
+
+> Auto-accept Run, Accept, and Always Allow buttons in Antigravity via CDP with Webview Guard isolation.
+
+This file follows the llms.txt convention: a short, LLM-friendly index of the project.
+
+## Docs
+
+- [Homepage](https://github.com/yazanbaker94/AntiGravity-AutoAccept#readme): project landing page
+- [Issues](https://github.com/yazanbaker94/AntiGravity-AutoAccept/issues): roadmap and known gaps
+- [README.md](./README.md): install, run and test instructions
+
+## Key facts
+
+- Install: `npm install antigravity-autoaccept`
+- Test: `npm run test`
+
+## Optional
+
+- [llms-full.txt](./llms-full.txt): the full documentation in a single file
+- [AGENTS.md](./AGENTS.md): instructions for coding agents
+<!-- rdk:generated:end -->
+
+## Hand-written notes
+
+<!-- Everything below the end marker is preserved by `rdk fix`. Put hand-written context here; the block above is regenerated from .discoverability/project.yml. -->

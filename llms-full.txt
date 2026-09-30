@@ -1,3 +1,14 @@
+<!-- rdk:generated:start -->
+# antigravity-autoaccept — full documentation
+
+> Auto-accept Run, Accept, and Always Allow buttons in Antigravity via CDP with Webview Guard isolation.
+
+This is the concatenated documentation intended for LLM grounding. Regenerate with `rdk fix`.
+
+---
+
+# README
+
 # AntiGravity AutoAccept
 <!-- v3.13.8 safety presets + bulk blocked commands -->
 
@@ -334,3 +345,8 @@ MIT
 ## Why choose this
 
 <!-- TODO: 2-4 differentiators, with numbers -->
+<!-- rdk:generated:end -->
+
+## Hand-written notes
+
+<!-- Everything below the end marker is preserved by `rdk fix`. Put hand-written context here; the block above is regenerated from .discoverability/project.yml. -->

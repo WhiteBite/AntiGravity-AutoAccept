@@ -1,0 +1,18 @@
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareSourceCode",
+  "name": "antigravity-autoaccept",
+  "description": "Auto-accept Run, Accept, and Always Allow buttons in Antigravity via CDP with Webview Guard isolation.",
+  "programmingLanguage": "JavaScript",
+  "runtimePlatform": "Node.js",
+  "license": "https://opensource.org/licenses/MIT",
+  "keywords": "open-source, developer-tools, library, antigravity, autoaccept, auto-accept, accept, always, allow, buttons, webview, guard",
+  "url": "https://github.com/yazanbaker94/AntiGravity-AutoAccept#readme",
+  "softwareVersion": "3.13.8",
+  "codeRepository": "https://github.com/yazanbaker94/AntiGravity-AutoAccept",
+  "author": "WhiteBite",
+  "sameAs": [
+    "https://github.com/yazanbaker94/AntiGravity-AutoAccept",
+    "https://www.npmjs.com/package/antigravity-autoaccept"
+  ]
+}

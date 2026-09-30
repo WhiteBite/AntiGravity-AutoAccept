@@ -16,3 +16,7 @@ vsix_check
 temp_extract
 *.zip
 worker/
+node_modules/
+dist/
+build/
+*.log
