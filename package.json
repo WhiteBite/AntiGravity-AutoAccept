@@ -86,7 +86,9 @@
   },
   "scripts": {
     "package": "npx -y @vscode/vsce package",
-    "test": "node test/telemetry.test.js && node test/permission-engine.test.js && node test/connection-manager.test.js && node test/auto-fix.test.js"
+    "test": "node test/telemetry.test.js && node test/permission-engine.test.js && node test/connection-manager.test.js && node test/auto-fix.test.js",
+    "rdk:audit": "rdk audit",
+    "rdk:fix": "rdk fix"
   },
   "repository": {
     "type": "git",
@@ -114,5 +116,8 @@
   "homepage": "https://github.com/yazanbaker94/AntiGravity-AutoAccept#readme",
   "dependencies": {
     "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@whitebite/rdk-cli": "^0.2.0"
   }
 }
