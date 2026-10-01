@@ -118,6 +118,6 @@
     "ws": "^8.19.0"
   },
   "devDependencies": {
-    "repo-aeo": "^0.2.0"
+    "repo-aeo": "^0.3.0"
   }
 }
